@@ -4,79 +4,26 @@ import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
-  Pressable,
   RefreshControl,
   StyleSheet,
-  Text,
   TextInput,
   View,
 } from 'react-native';
 
+import { ChatListRow, LockedChatsEntry } from '../../../components/ChatListRow';
 import { ConnectionBanner } from '../../../components/ConnectionBanner';
-import { Avatar, EmptyState, Fab, IconButton } from '../../../components/design';
-import { peerLabel, useConversations } from '../../../messaging/hooks';
+import { EmptyState, Fab, IconButton } from '../../../components/design';
+import { peerLabel, useConversations, useLockedChatsSummary } from '../../../messaging/hooks';
 import { requestSync, useMessagingStore } from '../../../messaging/messagingEngine';
-import { colors, formatListTime, radius, spacing, type } from '../../../theme';
+import { colors, radius, spacing, type } from '../../../theme';
 
-const STATUS_ICON = {
-  sending: { name: 'time-outline', color: colors.subtle },
-  sent: { name: 'checkmark', color: colors.subtle },
-  delivered: { name: 'checkmark-done', color: colors.subtle },
-  read: { name: 'checkmark-done', color: colors.read },
-  failed: { name: 'alert-circle', color: colors.danger },
-};
-
-function Preview({ item }) {
-  if (item.lastStatus === 'undecryptable') {
-    return <Text style={styles.previewMuted}>🔒 Message could not be decrypted</Text>;
-  }
-  if (item.lastBody == null) return <Text style={styles.previewMuted}>No messages yet</Text>;
-  const status = item.lastDirection === 'out' ? STATUS_ICON[item.lastStatus] : null;
-  return (
-    <View style={styles.previewRow}>
-      {status ? <Ionicons name={status.name} size={16} color={status.color} /> : null}
-      <Text style={[styles.preview, item.unread > 0 && styles.previewUnread]} numberOfLines={1}>
-        {item.lastBody}
-      </Text>
-    </View>
-  );
-}
-
-function ChatRow({ item }) {
-  const name = peerLabel(item.peerUserId, item.title);
-  const unread = item.unread > 0;
-  return (
-    <Pressable
-      style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-      onPress={() => router.push(`/chat/${item.peerUserId}`)}
-      accessibilityRole="button"
-      accessibilityLabel={`${name}${unread ? `, ${item.unread} unread` : ''}`}
-      testID={`conversation-${item.peerUserId}`}
-    >
-      <Avatar id={item.peerUserId} name={item.title} />
-      <View style={styles.rowBody}>
-        <View style={styles.rowTop}>
-          <Text style={styles.name} numberOfLines={1}>
-            {name}
-          </Text>
-          <Text style={[styles.time, unread && styles.timeUnread]}>
-            {formatListTime(item.sortAt)}
-          </Text>
-        </View>
-        <View style={styles.rowBottom}>
-          <Preview item={item} />
-          {unread ? (
-            <Text style={styles.badge}>{item.unread > 99 ? '99+' : item.unread}</Text>
-          ) : null}
-        </View>
-      </View>
-    </Pressable>
-  );
-}
-
-/** Conversation list. Everything shown comes from the encrypted local database only. */
+/**
+ * Conversation list. Everything shown comes from the encrypted local database only. Locked
+ * chats are not listed or searchable here; they are behind the "Locked chats" entry.
+ */
 export default function ChatsScreen() {
   const { data, error } = useConversations();
+  const { data: locked } = useLockedChatsSummary();
   const syncing = useMessagingStore((state) => state.syncing);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
@@ -90,6 +37,8 @@ export default function ChatsScreen() {
         (c.lastBody ?? '').toLowerCase().includes(q),
     );
   }, [data, query]);
+
+  const showLockedEntry = (locked?.total ?? 0) > 0 && !query;
 
   return (
     <View style={styles.container}>
@@ -132,8 +81,18 @@ export default function ChatsScreen() {
         <FlatList
           data={visible}
           keyExtractor={(item) => item.peerUserId}
-          renderItem={({ item }) => <ChatRow item={item} />}
-          contentContainerStyle={visible.length === 0 ? styles.emptyContainer : styles.list}
+          renderItem={({ item }) => <ChatListRow item={item} />}
+          ListHeaderComponent={
+            showLockedEntry ? (
+              <LockedChatsEntry
+                hasUnread={locked.hasUnread}
+                onPress={() => router.push('/locked-chats')}
+              />
+            ) : null
+          }
+          contentContainerStyle={
+            visible.length === 0 && !showLockedEntry ? styles.emptyContainer : styles.list
+          }
           keyboardShouldPersistTaps="handled"
           refreshControl={
             <RefreshControl
@@ -145,7 +104,7 @@ export default function ChatsScreen() {
           ListEmptyComponent={
             query ? (
               <EmptyState icon="search-outline" title="No matching chats" />
-            ) : (
+            ) : showLockedEntry ? null : (
               <EmptyState
                 icon="chatbubbles-outline"
                 title="No chats yet"
@@ -177,41 +136,4 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   searchInput: { flex: 1, paddingVertical: spacing.sm, ...type.body },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-  },
-  rowPressed: { backgroundColor: colors.surface },
-  rowBody: {
-    flex: 1,
-    gap: 3,
-    paddingBottom: spacing.md,
-    marginBottom: -spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.divider,
-  },
-  rowTop: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  rowBottom: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  name: { ...type.heading, flex: 1 },
-  time: type.caption,
-  timeUnread: { color: colors.primary, fontWeight: '600' },
-  previewRow: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 4 },
-  preview: { ...type.secondary, flexShrink: 1 },
-  previewUnread: { color: colors.text },
-  previewMuted: { ...type.secondary, flex: 1, fontStyle: 'italic' },
-  badge: {
-    minWidth: 22,
-    paddingHorizontal: 6,
-    borderRadius: radius.pill,
-    overflow: 'hidden',
-    backgroundColor: colors.primary,
-    color: colors.onPrimary,
-    fontSize: 12,
-    fontWeight: '700',
-    textAlign: 'center',
-    lineHeight: 22,
-  },
 });

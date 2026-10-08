@@ -3,6 +3,7 @@ import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Keyboard,
   Platform,
@@ -15,15 +16,22 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuthStore } from '../../../auth/authStore';
+import { ChatLockGate } from '../../../components/ChatLockGate';
 import { ConnectionBanner } from '../../../components/ConnectionBanner';
 import { Avatar, IconButton } from '../../../components/design';
 import { peerLabel, useChat } from '../../../messaging/hooks';
 import {
+  bumpRevision,
   markConversationRead,
   retryFailedMessage,
   sendMessage,
   useMessagingStore,
 } from '../../../messaging/messagingEngine';
+import {
+  chatLockErrorMessage,
+  lockConversation,
+  unlockConversation,
+} from '../../../security/chatLock';
 import { colors, formatClock, formatDay, radius, spacing, type } from '../../../theme';
 
 /** Max characters per message (keeps the ciphertext well under the API's size limit). */
@@ -125,9 +133,49 @@ function Header({ peer, title }) {
 }
 
 /** One 1:1 conversation. Messages are read from, and written to, the encrypted local DB. */
+/** Lock/Unlock action in the chat header (authentication is required either way). */
+function LockAction({ peer, locked }) {
+  const run = async () => {
+    const result = locked ? await unlockConversation(peer) : await lockConversation(peer);
+    const message = result.ok ? null : chatLockErrorMessage(result.error);
+    if (message) Alert.alert('Chat Lock', message);
+    else if (result.ok) bumpRevision();
+  };
+  const confirm = () =>
+    Alert.alert(
+      locked ? 'Unlock chat?' : 'Lock chat?',
+      locked
+        ? 'This chat will appear in your chat list again.'
+        : 'This chat will move to Locked chats. Opening it will require your fingerprint, face or screen lock.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: locked ? 'Unlock chat' : 'Lock chat', onPress: run },
+      ],
+    );
+  return (
+    <IconButton
+      icon={locked ? 'lock-open-outline' : 'lock-closed-outline'}
+      label={locked ? 'Unlock chat' : 'Lock chat'}
+      onPress={confirm}
+    />
+  );
+}
+
+/**
+ * Chat route. The lock gate decides first; message content is only loaded by ChatContent,
+ * which is mounted only for unlocked chats or after Chat Lock authentication.
+ */
 export default function ChatScreen() {
   const { peerUserId } = useLocalSearchParams();
   const peer = String(peerUserId);
+  return (
+    <ChatLockGate peerUserId={peer}>
+      <ChatContent peer={peer} />
+    </ChatLockGate>
+  );
+}
+
+function ChatContent({ peer }) {
   const me = useAuthStore((state) => state.user);
   const { data, error } = useChat(peer);
   const revision = useMessagingStore((state) => state.revision);
@@ -159,7 +207,10 @@ export default function ChatScreen() {
       ]}
     >
       <Stack.Screen
-        options={{ headerTitle: () => <Header peer={peer} title={data?.conversation?.title} /> }}
+        options={{
+          headerTitle: () => <Header peer={peer} title={data?.conversation?.title} />,
+          headerRight: () => <LockAction peer={peer} locked={data?.conversation?.locked === 1} />,
+        }}
       />
       <ConnectionBanner />
 

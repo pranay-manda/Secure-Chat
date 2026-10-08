@@ -83,23 +83,22 @@ export default function SettingsScreen() {
         disabled
       />
       <ListRow
-        icon="lock-closed-outline"
-        title="Chat lock"
-        subtitle="Lock chats with your fingerprint"
-        badge="Soon"
-        disabled
-      />
-      <ListRow
-        icon="shield-checkmark-outline"
-        title="Security"
-        subtitle="Encryption, session and local storage"
-        onPress={() => router.push('/security')}
-      />
-      <ListRow
         icon="phone-portrait-outline"
         title="Devices"
         subtitle="Where you’re signed in"
         onPress={() => router.push('/devices')}
+      />
+      <ListRow
+        icon="lock-closed-outline"
+        title="Chat Lock"
+        subtitle="Hide chats behind your fingerprint, face or screen lock"
+        onPress={() => router.push('/chat-lock')}
+      />
+      <ListRow
+        icon="shield-checkmark-outline"
+        title="Security information"
+        subtitle="Encryption, session and local storage"
+        onPress={() => router.push('/security')}
       />
 
       <SectionHeader>App</SectionHeader>

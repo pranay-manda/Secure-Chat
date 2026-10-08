@@ -263,6 +263,39 @@ jest.mock('expo-notifications', () => {
   };
 });
 
+/**
+ * expo-local-authentication test double (the OS prompt). Per-device state in
+ * `globalThis.__device.auth`: `level` (enrolled security level) and `results`, a queue of
+ * outcomes for the next prompts ({ success: true } or { success: false, error }).
+ */
+jest.mock('expo-local-authentication', () => {
+  const state = () =>
+    (globalThis.__device.auth ??= { level: 3, types: [1], results: [], prompts: [] });
+  return {
+    SecurityLevel: { NONE: 0, SECRET: 1, BIOMETRIC_WEAK: 2, BIOMETRIC_STRONG: 3 },
+    AuthenticationType: { FINGERPRINT: 1, FACIAL_RECOGNITION: 2, IRIS: 3 },
+    getEnrolledLevelAsync: jest.fn(async () => state().level),
+    supportedAuthenticationTypesAsync: jest.fn(async () => state().types),
+    authenticateAsync: jest.fn(async (options) => {
+      state().prompts.push(options);
+      return state().results.shift() ?? { success: true };
+    }),
+  };
+});
+
+/** expo-screen-capture test double: tracks which keys currently prevent capture. */
+jest.mock('expo-screen-capture', () => {
+  const active = () => (globalThis.__device.screenCapture ??= new Set());
+  return {
+    preventScreenCaptureAsync: jest.fn(async (key) => {
+      active().add(key);
+    }),
+    allowScreenCaptureAsync: jest.fn(async (key) => {
+      active().delete(key);
+    }),
+  };
+});
+
 // The Signal native module runs the official libsignal (Node build of the same release).
 jest.mock('../modules/signal-protocol', () => ({
   isSignalAvailable: () => true,

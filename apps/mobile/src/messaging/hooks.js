@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 
-import { getConversation, listChatMessages, listConversations } from './messageStore';
+import {
+  getConversation,
+  listChatMessages,
+  listConversations,
+  lockedChatsSummary,
+} from './messageStore';
 import { useMessagingStore } from './messagingEngine';
 
 /** Re-reads `load()` from the encrypted database whenever local messaging data changes. */
@@ -23,8 +28,19 @@ function useLocalQuery(load, deps) {
   return state;
 }
 
+/** Unlocked conversations only (locked ones are listed by useLockedConversations). */
 export function useConversations() {
   return useLocalQuery(listConversations, []);
+}
+
+/** Locked conversations. Only call when a Chat Lock unlock session is active. */
+export function useLockedConversations(enabled) {
+  return useLocalQuery(async () => (enabled ? listConversations({ locked: true }) : []), [enabled]);
+}
+
+/** Whether locked chats exist / have unread messages (no names, previews or counts). */
+export function useLockedChatsSummary() {
+  return useLocalQuery(lockedChatsSummary, []);
 }
 
 /** Total unread incoming messages (tab badge). */

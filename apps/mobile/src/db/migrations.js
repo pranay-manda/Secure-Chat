@@ -128,4 +128,14 @@ export const MIGRATIONS = [
       );
     `,
   },
+  {
+    // Chat Lock: local access control for individual conversations (not encryption; messages
+    // are already end-to-end encrypted and this whole database is SQLCipher-encrypted).
+    // Never synced: the server does not know which chats are locked.
+    version: 4,
+    sql: `
+      ALTER TABLE conversations ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE conversations ADD COLUMN locked_at INTEGER;
+    `,
+  },
 ];

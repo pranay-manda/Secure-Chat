@@ -34,6 +34,9 @@ export const useMessagingStore = create(() => ({
 
 const bump = () => useMessagingStore.setState((s) => ({ revision: s.revision + 1 }));
 
+/** Tells screens that local conversation data changed (e.g. a chat was locked). */
+export const bumpRevision = bump;
+
 let engine = null;
 
 /** True while `run` belongs to the current, not yet stopped engine. */

@@ -39,6 +39,12 @@
           "defaultChannel": "messages"
         }
       ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow Secure Chat to use Face ID to open your locked chats."
+        }
+      ],
       "./plugins/withSqlcipherOpenssl",
       "./plugins/withLibsignalAndroid",
       [

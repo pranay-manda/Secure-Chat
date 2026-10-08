@@ -40,14 +40,19 @@ export async function ensureConversation(peerUserId, { title = null, at = null }
 export async function getConversation(peerUserId) {
   return getDatabase().getFirstAsync(
     `SELECT peer_user_id AS peerUserId, title, created_at AS createdAt,
-            last_message_at AS lastMessageAt
+            last_message_at AS lastMessageAt, locked
        FROM conversations WHERE peer_user_id = ?;`,
     peerUserId,
   );
 }
 
-/** Conversation list with the latest message and unread count, most recent first. */
-export async function listConversations() {
+/**
+ * Conversation list with the latest message and unread count, most recent first.
+ * Locked conversations are excluded unless `locked: true` asks for exactly those (only after
+ * Chat Lock authentication), so their names and previews never reach the normal chat list,
+ * its search or the unread badge.
+ */
+export async function listConversations({ locked = false } = {}) {
   return getDatabase().getAllAsync(
     `SELECT c.peer_user_id AS peerUserId, c.title,
             COALESCE(c.last_message_at, c.created_at) AS sortAt,
@@ -59,8 +64,44 @@ export async function listConversations() {
        LEFT JOIN messages last ON last.id = (
          SELECT m.id FROM messages m WHERE m.peer_user_id = c.peer_user_id
           ORDER BY m.created_at DESC, m.id DESC LIMIT 1)
+      WHERE c.locked = ?
       ORDER BY sortAt DESC;`,
+    locked ? 1 : 0,
   );
+}
+
+// --- Chat Lock (local access control; see src/security/chatLock.js) ---
+
+export async function isConversationLocked(peerUserId) {
+  const row = await getDatabase().getFirstAsync(
+    'SELECT locked FROM conversations WHERE peer_user_id = ?;',
+    peerUserId,
+  );
+  return row?.locked === 1;
+}
+
+export async function setConversationLocked(peerUserId, locked) {
+  await ensureConversation(peerUserId);
+  await getDatabase().runAsync(
+    'UPDATE conversations SET locked = ?, locked_at = ? WHERE peer_user_id = ?;',
+    locked ? 1 : 0,
+    locked ? now() : null,
+    peerUserId,
+  );
+}
+
+/**
+ * What the chat list may show about locked chats without authentication: whether any exist
+ * and whether any has unread messages. No names, previews or counts.
+ */
+export async function lockedChatsSummary() {
+  const row = await getDatabase().getFirstAsync(
+    `SELECT count(*) AS total,
+            EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.peer_user_id = m.peer_user_id
+                     WHERE c.locked = 1 AND m.direction = 'in' AND m.status = 'received') AS hasUnread
+       FROM conversations WHERE locked = 1;`,
+  );
+  return { total: row?.total ?? 0, hasUnread: row?.hasUnread === 1 };
 }
 
 // --- Messages ---
