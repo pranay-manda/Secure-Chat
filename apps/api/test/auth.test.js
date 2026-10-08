@@ -1,8 +1,9 @@
 import { SignJWT } from 'jose';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Session } from '../src/models/Session.js';
+import { User } from '../src/models/User.js';
 import {
   bearer,
   buildTestApp,
@@ -29,6 +30,37 @@ beforeEach(async () => {
 const getDevices = (accessToken) => request(ctx.app).get('/devices').set(bearer(accessToken));
 const refresh = (refreshToken, deviceId) =>
   request(ctx.app).post('/auth/refresh').send({ refreshToken, deviceId });
+
+describe('sensitive data in error logs', () => {
+  it('an unexpected database error during login logs no phone number', async () => {
+    // A real duplicate-key error from MongoDB, raised where the login creates the user.
+    await User.create({ phoneNumber: PHONE });
+    let realError;
+    try {
+      await User.create({ phoneNumber: PHONE });
+    } catch (err) {
+      realError = err;
+    }
+    expect(String(realError.message)).toContain(PHONE.slice(-6));
+    await User.deleteMany({});
+    const spy = vi.spyOn(User, 'findOneAndUpdate').mockRejectedValue(realError);
+
+    const requested = await request(ctx.app).post('/auth/otp/request').send({ phoneNumber: PHONE });
+    expect(requested.status).toBe(202);
+    const otp = ctx.sms.sent.at(-1).otp;
+    const res = await request(ctx.app)
+      .post('/auth/otp/verify')
+      .send({ phoneNumber: PHONE, otp, device: newDevice() });
+    spy.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(res.body.error.code).toBe('INTERNAL_ERROR');
+    const logged = JSON.stringify(ctx.lines);
+    expect(logged).toContain('Unhandled error');
+    expect(logged).not.toContain(PHONE.slice(-10));
+    expect(logged).not.toContain(PHONE.slice(-6));
+  });
+});
 
 describe('authentication middleware', () => {
   it('accepts a valid access token', async () => {

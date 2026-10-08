@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import { HEADERS, LIMITS } from '@secure-chat/shared/constants';
 
+import { serializeError } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import { createContactsRouter } from './modules/contacts/contacts.routes.js';
@@ -55,6 +56,7 @@ export function createApp({ config, logger, healthChecks, container }) {
       serializers: {
         req: (req) => ({ id: req.id, method: req.method, path: req.url.split('?')[0] }),
         res: (res) => ({ statusCode: res.statusCode }),
+        err: serializeError,
       },
       customLogLevel(req, res, err) {
         if (err || res.statusCode >= 500) return 'error';

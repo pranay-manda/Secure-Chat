@@ -256,6 +256,71 @@ describe('POST /messages', () => {
   });
 });
 
+describe('access control between users and devices', () => {
+  it('a user can never list, acknowledge or mark read envelopes addressed to someone else', async () => {
+    const sent = await alice.sendText(peer(bob), 'for Bob only');
+    const messageId = sent.res.body.messageId;
+
+    // Alice (the sender) and an unrelated user see nothing of Bob's inbox.
+    const carol = await makeDevice('+919811100000');
+    for (const intruder of [alice, carol]) {
+      const list = await api(intruder).get('/messages/envelopes?after=0');
+      expect(list.status).toBe(200);
+      expect(list.body.envelopes).toEqual([]);
+      const ack = await api(intruder).post('/messages/envelopes/ack', { upToSeq: 1_000_000 });
+      expect(ack.body.acknowledged).toBe(0);
+      const read = await api(intruder).post('/messages/read', { messageIds: [messageId] });
+      expect(read.body.updated).toBe(0);
+    }
+    // Carol cannot see the status of a message she did not send.
+    const status = await api(carol).post('/messages/status', { messageIds: [messageId] });
+    expect(status.body.statuses).toEqual([]);
+
+    const envelope = await MessageEnvelope.findOne({ messageId }).lean();
+    expect(envelope.deliveredAt).toBeNull();
+    expect((await Message.findById(messageId).lean()).readAt).toBeNull();
+    expect(await receiveAll(bob)).toEqual(['for Bob only']);
+  });
+
+  it('a replaced device loses access at once; the new device never gets the old device’s envelopes', async () => {
+    await alice.sendText(peer(bob), 'to the old phone');
+    await ctx.redis.flushall(); // OTP resend cooldown for Bob's number
+    const bobNew = await makeDevice(BOB); // Bob signs in on another phone
+
+    for (const path of ['/messages/envelopes?after=0', '/keys/status', '/pusher/config']) {
+      expect((await api(bob).get(path)).status).toBe(401);
+    }
+    expect((await api(bobNew).get('/messages/envelopes?after=0')).body.envelopes).toEqual([]);
+
+    // A sender with a session for the old device is told to fetch the new keys.
+    const stale = await api(alice).post('/messages', {
+      recipientUserId: bob.auth.userId,
+      recipientDeviceId: bob.auth.deviceId,
+      clientMessageId: randomUUID(),
+      type: 2,
+      ciphertext: Buffer.from('opaque').toString('base64'),
+    });
+    expect(stale.body.error.code).toBe('STALE_RECIPIENT_DEVICE');
+  });
+
+  it('envelopes expire on the server: TTL index, 30 days undelivered, 7 days after delivery', async () => {
+    const sent = await alice.sendText(peer(bob), 'expiring');
+    const envelope = await MessageEnvelope.findOne({ messageId: sent.res.body.messageId }).lean();
+    const ttl = (await MessageEnvelope.collection.indexes()).find((i) => i.key.expiresAt === 1);
+    expect(ttl.expireAfterSeconds).toBe(0);
+    const day = 24 * 60 * 60 * 1000;
+    expect(envelope.expiresAt - envelope.createdAt).toBeGreaterThan(29 * day);
+    expect(envelope.expiresAt - envelope.createdAt).toBeLessThanOrEqual(30 * day + 1000);
+
+    await receiveAll(bob);
+    const acked = await MessageEnvelope.findById(envelope._id).lean();
+    expect(acked.expiresAt - acked.deliveredAt).toBe(ENVELOPE_RETENTION.DELIVERED_MS);
+    // Message metadata has its own TTL too.
+    const messageTtl = (await Message.collection.indexes()).find((i) => i.key.expiresAt === 1);
+    expect(messageTtl.expireAfterSeconds).toBe(0);
+  });
+});
+
 describe('realtime (Pusher) events', () => {
   it('publishes the encrypted envelope to the recipient device channel only', async () => {
     const text = 'Hello Bob, realtime';

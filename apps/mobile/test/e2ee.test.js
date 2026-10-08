@@ -30,6 +30,7 @@ function boot(name) {
       auth: require('../src/auth/authStore'),
       signal: require('../src/crypto/signalService'),
       store: require('../src/crypto/signalStore'),
+      db: require('../src/db/database'),
     };
   });
   apps[name] = app;
@@ -49,9 +50,17 @@ function createServer() {
     seq: 0,
     requests: [],
     published: [],
+    failNextPut: 0,
   };
   const userByToken = (headers) =>
     Object.keys(USERS).find((k) => headers.Authorization === `Bearer token-${k}`);
+  // Same shape as GET /keys/status of the API.
+  const statusOf = (d) => ({
+    registered: Boolean(d?.signal),
+    signedPreKeyId: d?.signal?.signedPreKey.keyId ?? null,
+    kyberPreKeyId: d?.signal?.kyberPreKey.keyId ?? null,
+    oneTimePreKeyCount: d?.oneTime.length ?? 0,
+  });
 
   const handlers = [
     [
@@ -79,29 +88,26 @@ function createServer() {
       /^\/keys\/status$/,
       ({ me }) => {
         const d = state.devices[USERS[me].id];
-        return {
-          body: {
-            status: {
-              registered: Boolean(d?.signal),
-              oneTimePreKeyCount: d?.oneTime.length ?? 0,
-            },
-          },
-        };
+        return { body: { status: statusOf(d) } };
       },
     ],
     [
       'PUT',
       /^\/keys$/,
       ({ me, body }) => {
+        if (state.failNextPut > 0) {
+          state.failNextPut -= 1;
+          return { status: 503, body: { error: { code: 'SERVICE_UNAVAILABLE' } } };
+        }
+        // Like the API: new signed/Kyber keys replace the old ones, one-time keys are added.
         const { oneTimePreKeys = [], ...signal } = body;
+        const existing = state.devices[USERS[me].id];
         state.devices[USERS[me].id] = {
           deviceId: USERS[me].deviceId,
           signal,
-          oneTime: oneTimePreKeys,
+          oneTime: [...(existing?.oneTime ?? []), ...oneTimePreKeys],
         };
-        return {
-          body: { status: { registered: true, oneTimePreKeyCount: oneTimePreKeys.length } },
-        };
+        return { body: { status: statusOf(state.devices[USERS[me].id]) } };
       },
     ],
     [
@@ -284,6 +290,55 @@ describe('E2EE between two app instances', () => {
     expect(inbox.map((m) => m.body)).toEqual(['survives crash']);
   });
 
+  it('a replayed ciphertext (same Signal message under a new envelope id) is never shown twice', async () => {
+    await as('A', (app) => app.signal.sendText(USERS.A.id, USERS.B.id, 'only once'));
+    await as('B', (app) => app.signal.syncInbox(USERS.B.id));
+    // A malicious or buggy server re-delivers the same ciphertext as a "new" message.
+    const original = server.envelopes[0];
+    server.seq += 1;
+    server.envelopes.push({
+      ...original,
+      envelopeId: `env-${server.seq}`,
+      seq: server.seq,
+      messageId: `msg-${server.seq}`,
+      delivered: false,
+    });
+
+    const result = await as('B', (app) => app.signal.syncInbox(USERS.B.id));
+    // libsignal refuses it (its one-time pre-key is already used and deleted): the text is
+    // never produced a second time. At most an unreadable placeholder appears, exactly as
+    // for any garbage a server could inject.
+    expect(result).toEqual({ received: 0, failed: 1 });
+    const inbox = await as('B', (app) => app.signal.listConversation(USERS.A.id));
+    expect(inbox.filter((m) => m.body === 'only once')).toHaveLength(1);
+    expect(inbox.filter((m) => m.status === 'received')).toHaveLength(1);
+  });
+
+  it('a replayed message on an established session is dropped silently as a duplicate', async () => {
+    await as('A', (app) => app.signal.sendText(USERS.A.id, USERS.B.id, 'ping'));
+    await as('B', (app) => app.signal.syncInbox(USERS.B.id));
+    await as('B', (app) => app.signal.sendText(USERS.B.id, USERS.A.id, 'pong'));
+    await as('A', (app) => app.signal.syncInbox(USERS.A.id));
+    const whisper = await as('A', (app) => app.signal.sendText(USERS.A.id, USERS.B.id, 'again'));
+    expect(whisper.type).toBe(2);
+    await as('B', (app) => app.signal.syncInbox(USERS.B.id));
+
+    const original = server.envelopes.at(-1);
+    server.seq += 1;
+    server.envelopes.push({
+      ...original,
+      envelopeId: `env-${server.seq}`,
+      seq: server.seq,
+      messageId: `msg-${server.seq}`,
+      delivered: false,
+    });
+    await as('B', (app) => app.signal.syncInbox(USERS.B.id));
+
+    const inbox = await as('B', (app) => app.signal.listConversation(USERS.A.id));
+    // No copy and no placeholder ('pong' is B's own outgoing message).
+    expect(inbox.map((m) => m.body)).toEqual(['again', 'pong', 'ping']);
+  });
+
   it('handles inline realtime envelopes and id-only events for large envelopes', async () => {
     await as('A', (app) => app.signal.sendText(USERS.A.id, USERS.B.id, 'small'));
     expect(server.published.at(-1).inline).toBe(true);
@@ -350,5 +405,106 @@ describe('key handling security', () => {
     expect(storage.A.secureStore.has('db.key')).toBe(false);
     expect(storage.A.sqliteFiles.has('securechat.db')).toBe(false);
     expect([...storage.A.secureStore.keys()]).toEqual(['device.id']);
+  });
+});
+
+describe('signed and Kyber pre-key rotation', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  /** Moves device `name`'s signed/Kyber pre-keys `days` into the past (as if time passed). */
+  const age = (name, days) =>
+    as(name, async (app) => {
+      const db = app.db.getDatabase();
+      for (const table of ['signal_signed_prekeys', 'signal_kyber_prekeys']) {
+        await db.runAsync(`UPDATE ${table} SET created_at = created_at - ?;`, days * DAY);
+      }
+    });
+  const localIds = (name, table) =>
+    as(name, async (app) =>
+      (await app.db.getDatabase().getAllAsync(`SELECT key_id AS id FROM ${table};`)).map(
+        (r) => r.id,
+      ),
+    );
+  const keyUploads = () => server.requests.filter((r) => r.method === 'PUT' && r.path === '/keys');
+  const served = (name) => server.devices[USERS[name].id].signal;
+  const maintain = (name) => as(name, (app) => app.signal.ensureKeysRegistered());
+
+  it('keeps the signed and Kyber pre-keys for 7 days (no rotation before)', async () => {
+    const before = keyUploads().length;
+    await age('B', 6);
+    await maintain('B');
+    expect(keyUploads().length).toBe(before);
+  });
+
+  it('rotates after 7 days: new public keys only, same identity, in-flight first messages still decrypt', async () => {
+    const old = { ...served('B') };
+    // A starts a session with B's CURRENT keys; the message is still on the server.
+    await as('A', (app) => app.signal.sendText(USERS.A.id, USERS.B.id, 'sent before rotation'));
+
+    await age('B', 8);
+    await maintain('B');
+
+    const upload = JSON.parse(keyUploads().at(-1).body);
+    expect(Object.keys(upload).sort()).toEqual(
+      ['identityKey', 'kyberPreKey', 'registrationId', 'signedPreKey'].sort(),
+    );
+    expect(Object.keys(upload.signedPreKey).sort()).toEqual(['keyId', 'publicKey', 'signature']);
+    expect(upload.identityKey).toBe(old.identityKey);
+    expect(upload.registrationId).toBe(old.registrationId);
+    expect(served('B').signedPreKey.keyId).not.toBe(old.signedPreKey.keyId);
+    expect(served('B').kyberPreKey.keyId).not.toBe(old.kyberPreKey.keyId);
+    expect(server.devices[USERS.B.id].oneTime.length).toBeGreaterThan(0); // untouched
+
+    // The old private keys are still on the phone, so the in-flight message decrypts.
+    await as('B', (app) => app.signal.syncInbox(USERS.B.id));
+    expect((await as('B', (app) => app.signal.listConversation(USERS.A.id)))[0]).toMatchObject({
+      body: 'sent before rotation',
+      status: 'received',
+    });
+
+    // A brand-new session now uses the new keys and works too.
+    await as('A', async (app) => {
+      await app.store.deleteSession(app.store.addressOf(USERS.B.id));
+      await app.store.deletePeerDevice(USERS.B.id);
+    });
+    await as('A', (app) => app.signal.sendText(USERS.A.id, USERS.B.id, 'after rotation'));
+    await as('B', (app) => app.signal.syncInbox(USERS.B.id));
+    expect((await as('B', (app) => app.signal.listConversation(USERS.A.id)))[0].body).toBe(
+      'after rotation',
+    );
+  });
+
+  it('deletes a replaced private key 35 days after its replacement, never the served one', async () => {
+    const [first] = await localIds('B', 'signal_signed_prekeys');
+    await age('B', 8);
+    await maintain('B'); // rotation 1: first -> second
+    const second = served('B').signedPreKey.keyId;
+
+    await age('B', 34); // second replaced first 34 days ago: first must still be kept
+    await maintain('B'); // rotation 2 (second is 34 days old)
+    expect(await localIds('B', 'signal_signed_prekeys')).toEqual(
+      expect.arrayContaining([first, second]),
+    );
+
+    await age('B', 2); // now 36 days since first was replaced
+    await maintain('B');
+    const ids = await localIds('B', 'signal_signed_prekeys');
+    expect(ids).not.toContain(first);
+    expect(ids).toContain(served('B').signedPreKey.keyId);
+    expect((await localIds('B', 'signal_kyber_prekeys')).length).toBe(ids.length);
+  });
+
+  it('a failed upload is retried later, and messaging is never blocked by it', async () => {
+    const old = served('B').signedPreKey.keyId;
+    await age('B', 8);
+    server.failNextPut = 1;
+    await expect(maintain('B')).resolves.toBeDefined(); // no error surfaces
+    expect(served('B').signedPreKey.keyId).toBe(old); // server still has the old keys
+
+    await maintain('B'); // the server is behind: upload again
+    expect(served('B').signedPreKey.keyId).not.toBe(old);
+    const newest = await as('B', (app) => app.store.newestRotatedPreKey('signed'));
+    expect(served('B').signedPreKey.keyId).toBe(newest.keyId);
+    // The key the server served meanwhile was never deleted.
+    expect(await localIds('B', 'signal_signed_prekeys')).toContain(old);
   });
 });

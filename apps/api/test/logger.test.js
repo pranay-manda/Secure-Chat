@@ -37,4 +37,28 @@ describe('logger redaction', () => {
     expect(lines[0].chatId).toBe('abc');
     expect(lines[0].err.code).toBe('ECONNREFUSED');
   });
+
+  it('removes values that database errors quote in their message, stack and fields', () => {
+    const { logger, lines } = createCapturingLogger();
+    const message =
+      'E11000 duplicate key error collection: securechat.users index: phoneNumber_1 ' +
+      'dup key: { phoneNumber: "+919812345678" }';
+    // Shape of a MongoServerError from the driver.
+    const err = Object.assign(new Error(message), {
+      name: 'MongoServerError',
+      code: 11000,
+      keyPattern: { phoneNumber: 1 },
+      keyValue: { phoneNumber: '+919812345678' },
+      errorResponse: { code: 11000, errmsg: message, keyValue: { phoneNumber: '+919812345678' } },
+      errmsg: message,
+    });
+
+    logger.error({ err }, 'failed');
+
+    const serialized = JSON.stringify(lines[0]);
+    expect(serialized).not.toContain('+919812345678');
+    expect(serialized).not.toContain('9812345678');
+    expect(lines[0].err.code).toBe(11000); // still diagnosable
+    expect(lines[0].err.message).toContain('dup key: [REDACTED]');
+  });
 });

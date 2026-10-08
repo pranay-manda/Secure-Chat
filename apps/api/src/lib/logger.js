@@ -42,6 +42,35 @@ export const REDACT_PATHS = [
   ...SENSITIVE_KEYS.flatMap((key) => [key, `*.${key}`, `*.*.${key}`]),
 ];
 
+/** MongoDB duplicate-key messages quote the duplicate value, e.g. a phone number or email. */
+const DUPLICATE_KEY_VALUE = /dup key: \{[^}]*\}/g;
+/** Error properties in which database drivers echo document values. */
+const VALUE_BEARING_ERROR_FIELDS = [
+  'keyValue',
+  'errorResponse',
+  'errInfo',
+  'writeErrors',
+  'errmsg',
+];
+
+/**
+ * Error serializer: pino's standard one, minus document values that database errors carry in
+ * their message, stack and extra fields (field redaction cannot see inside a message string).
+ */
+export function serializeError(err) {
+  const serialized = pino.stdSerializers.err(err);
+  if (!serialized || typeof serialized !== 'object') return serialized;
+  const scrub = (value) =>
+    typeof value === 'string' ? value.replace(DUPLICATE_KEY_VALUE, `dup key: ${CENSOR}`) : value;
+  serialized.message = scrub(serialized.message);
+  serialized.stack = scrub(serialized.stack);
+  for (const field of VALUE_BEARING_ERROR_FIELDS) delete serialized[field];
+  if (serialized.cause && typeof serialized.cause === 'object') {
+    serialized.cause = serializeError(serialized.cause);
+  }
+  return serialized;
+}
+
 /**
  * @param {{ level?: string, nodeEnv?: string }} options
  * @param {import('pino').DestinationStream} [destination] optional stream (used by tests)
@@ -54,6 +83,7 @@ export function createLogger({ level = 'info', nodeEnv = 'development' } = {}, d
       level,
       base: { service: 'secure-chat-api' },
       redact: { paths: REDACT_PATHS, censor: CENSOR },
+      serializers: { err: serializeError },
       timestamp: pino.stdTimeFunctions.isoTime,
       ...(usePretty && {
         transport: { target: 'pino-pretty', options: { colorize: true } },

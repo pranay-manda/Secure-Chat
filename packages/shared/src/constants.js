@@ -109,6 +109,14 @@ export const SIGNAL = Object.freeze({
    */
   SECURITY_CODE_ITERATIONS: 5200,
   SECURITY_CODE_VERSION: 2,
+  /** The signed (EC) and Kyber last-resort pre-keys are replaced this often. */
+  SIGNED_PREKEY_ROTATION_MS: 7 * 24 * 60 * 60 * 1000,
+  /**
+   * A replaced signed/Kyber pre-key (private half) is kept this long after its replacement, so
+   * a first message encrypted to it can still be decrypted when it arrives. Longer than the
+   * server's undelivered-envelope retention (30 days), then deleted for forward secrecy.
+   */
+  SIGNED_PREKEY_RETENTION_MS: 35 * 24 * 60 * 60 * 1000,
 });
 
 /** libsignal CiphertextMessage types carried in envelopes. */

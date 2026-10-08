@@ -89,6 +89,44 @@ export async function loadAllKyberPreKeys() {
   return rows.map((r) => r.record);
 }
 
+/** Medium-term pre-key tables (signed EC and Kyber last-resort), whitelisted for the helpers. */
+const ROTATED_TABLES = { signed: 'signal_signed_prekeys', kyber: 'signal_kyber_prekeys' };
+
+/** The newest (current) signed or Kyber pre-key: `{ keyId, createdAt }` or null. */
+export async function newestRotatedPreKey(kind) {
+  return getDatabase().getFirstAsync(
+    `SELECT key_id AS keyId, created_at AS createdAt FROM ${ROTATED_TABLES[kind]}
+      ORDER BY created_at DESC, key_id DESC LIMIT 1;`,
+  );
+}
+
+export async function listRotatedPreKeyIds(kind) {
+  const rows = await getDatabase().getAllAsync(
+    `SELECT key_id AS keyId FROM ${ROTATED_TABLES[kind]};`,
+  );
+  return rows.map((r) => r.keyId);
+}
+
+/**
+ * Deletes superseded signed/Kyber pre-keys: a key is removed once a NEWER key has existed for
+ * longer than `retentionMs` (so messages encrypted to it just before the rotation can still
+ * arrive and decrypt). The newest key and any id in `keepIds` are never removed.
+ * @returns {Promise<number>} keys deleted
+ */
+export async function pruneRotatedPreKeys(kind, retentionMs, keepIds = []) {
+  const table = ROTATED_TABLES[kind];
+  const cutoff = now() - retentionMs;
+  const keep = keepIds.filter((id) => Number.isInteger(id));
+  const result = await getDatabase().runAsync(
+    `DELETE FROM ${table}
+      WHERE created_at < (SELECT max(created_at) FROM ${table} WHERE created_at <= ?)
+        ${keep.length > 0 ? `AND key_id NOT IN (${keep.map(() => '?').join(', ')})` : ''};`,
+    cutoff,
+    ...keep,
+  );
+  return result.changes;
+}
+
 export async function countLocalPreKeys() {
   const row = await getDatabase().getFirstAsync('SELECT count(*) AS n FROM signal_prekeys;');
   return row?.n ?? 0;
@@ -340,10 +378,18 @@ export async function listMessages(peerUserId, limit = 50) {
   );
 }
 
+/**
+ * Latest messages across chats (developer diagnostics). Locked chats are never included: their
+ * content may only be read through the Chat Lock gate.
+ */
 export async function listRecentMessages(limit = 10) {
   return getDatabase().getAllAsync(
-    `SELECT id, peer_user_id AS peerUserId, direction, body, status, created_at AS createdAt
-       FROM messages ORDER BY created_at DESC, id DESC LIMIT ?;`,
+    `SELECT m.id, m.peer_user_id AS peerUserId, m.direction, m.body, m.status,
+            m.created_at AS createdAt
+       FROM messages m
+       LEFT JOIN conversations c ON c.peer_user_id = m.peer_user_id
+      WHERE COALESCE(c.locked, 0) = 0
+      ORDER BY m.created_at DESC, m.id DESC LIMIT ?;`,
     limit,
   );
 }

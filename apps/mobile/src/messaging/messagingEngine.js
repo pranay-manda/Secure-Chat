@@ -7,6 +7,7 @@ import {
   acceptIdentityChange,
   deliverOutgoing,
   enqueueText,
+  ensureKeysRegistered,
   flushOutbox,
   handleRealtimeEnvelope,
   retryMessage,
@@ -213,6 +214,12 @@ export function handleAppStateChange(state) {
     run.retryRealtime = false;
     startRealtime(run); // no-op if still connected
     requestSync();
+    // Key maintenance (one-time pre-key top-up, signed/Kyber pre-key rotation) also runs for
+    // apps that stay open for days, not only at launch. Best effort; retried next foreground.
+    track(
+      run,
+      ensureKeysRegistered().catch(() => {}),
+    );
   }
 }
 

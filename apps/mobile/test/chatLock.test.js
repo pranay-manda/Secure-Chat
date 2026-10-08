@@ -124,6 +124,26 @@ describe('locking and unlocking', () => {
   });
 });
 
+describe('other ways to read messages', () => {
+  it('the developer E2EE card never lists messages of locked chats', async () => {
+    const signalStore = require('../src/crypto/signalStore');
+    const bodies = async () => (await signalStore.listRecentMessages(10)).map((m) => m.body);
+    expect(await bodies()).toEqual(
+      expect.arrayContaining(['hello from alice', 'secret plan from bob']),
+    );
+
+    await lock.lockConversation(BOB);
+    expect(await bodies()).toEqual(['hello from alice']);
+
+    // Its only data source is that query (no other message read path in the card).
+    const card = require('node:fs').readFileSync(
+      require('node:path').join(__dirname, '../src/components/E2EEDevCard.js'),
+      'utf8',
+    );
+    expect(card).not.toMatch(/listChatMessages|listConversations|listMessages\(/);
+  });
+});
+
 describe('unlock session', () => {
   it('a locked chat cannot be shown until the owner authenticates; backgrounding re-locks', async () => {
     await lock.lockConversation(BOB);

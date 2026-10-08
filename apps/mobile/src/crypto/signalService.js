@@ -69,14 +69,10 @@ export function ensureKeysRegistered() {
 
 async function registerKeys() {
   const identity = await ensureIdentity();
-  const { status } = await apiRequest('GET', '/keys/status');
+  let { status } = await apiRequest('GET', '/keys/status');
 
   if (!status.registered) {
-    const native = getSignalNative();
-    const signed = await native.generateSignedPreKey(identity.identityKeyPair, randomKeyId());
-    const kyber = await native.generateKyberPreKey(identity.identityKeyPair, randomKeyId());
-    await store.saveSignedPreKey(signed);
-    await store.saveKyberPreKey(kyber);
+    const { signed, kyber } = await newSignedAndKyberPreKeys(identity);
     const oneTimePreKeys = await generateOneTimePreKeys(SIGNAL.ONE_TIME_PREKEY_BATCH);
 
     const result = await apiRequest('PUT', '/keys', {
@@ -91,11 +87,88 @@ async function registerKeys() {
     return result.status;
   }
 
+  // Best effort: a failed rotation (offline, server error) is retried next time and never
+  // blocks messaging; the current keys stay valid meanwhile.
+  status = (await rotateSignedPreKeysIfDue(identity, status).catch(() => null)) ?? status;
+
   if (status.oneTimePreKeyCount < SIGNAL.ONE_TIME_PREKEY_LOW_WATERMARK) {
     const preKeys = await generateOneTimePreKeys(SIGNAL.ONE_TIME_PREKEY_BATCH);
     return (await apiRequest('POST', '/keys/one-time', { body: { preKeys } })).status;
   }
   return status;
+}
+
+/** A key id not used by any stored key of that kind (an id collision would overwrite a key). */
+async function unusedKeyId(kind) {
+  const used = new Set(await store.listRotatedPreKeyIds(kind));
+  let keyId;
+  do keyId = randomKeyId();
+  while (used.has(keyId));
+  return keyId;
+}
+
+/** Generates (libsignal) and stores a new signed EC pre-key and Kyber last-resort pre-key. */
+async function newSignedAndKyberPreKeys(identity) {
+  const native = getSignalNative();
+  const signed = await native.generateSignedPreKey(
+    identity.identityKeyPair,
+    await unusedKeyId('signed'),
+  );
+  const kyber = await native.generateKyberPreKey(
+    identity.identityKeyPair,
+    await unusedKeyId('kyber'),
+  );
+  await store.inTransaction(async () => {
+    await store.saveSignedPreKey(signed);
+    await store.saveKyberPreKey(kyber);
+  });
+  return { signed, kyber };
+}
+
+/**
+ * Replaces the signed and Kyber pre-keys every SIGNAL.SIGNED_PREKEY_ROTATION_MS, and also when
+ * the server is not serving this device's newest ones (e.g. an earlier upload failed). Replaced
+ * private keys are kept for SIGNAL.SIGNED_PREKEY_RETENTION_MS (in-flight first messages), then
+ * deleted, so a later compromise of the phone cannot decrypt old first messages that were
+ * encrypted without a one-time pre-key. The keys the server serves are never deleted.
+ * @returns {Promise<object|null>} the new server status if keys were uploaded
+ */
+async function rotateSignedPreKeysIfDue(identity, status) {
+  const [signed, kyber] = await Promise.all([
+    store.newestRotatedPreKey('signed'),
+    store.newestRotatedPreKey('kyber'),
+  ]);
+  const age = (key) => (key ? Date.now() - key.createdAt : Infinity);
+  const due =
+    age(signed) >= SIGNAL.SIGNED_PREKEY_ROTATION_MS ||
+    age(kyber) >= SIGNAL.SIGNED_PREKEY_ROTATION_MS;
+  const serverBehind =
+    (status.signedPreKeyId != null && status.signedPreKeyId !== signed?.keyId) ||
+    (status.kyberPreKeyId != null && status.kyberPreKeyId !== kyber?.keyId);
+
+  let uploaded = null;
+  if (due || serverBehind) {
+    const next = await newSignedAndKyberPreKeys(identity);
+    uploaded = (
+      await apiRequest('PUT', '/keys', {
+        body: {
+          registrationId: identity.registrationId,
+          identityKey: identity.identityKey,
+          signedPreKey: pickPublic(next.signed),
+          kyberPreKey: pickPublic(next.kyber),
+        },
+      })
+    ).status;
+  }
+
+  const served = uploaded ?? status;
+  await store.pruneRotatedPreKeys('signed', SIGNAL.SIGNED_PREKEY_RETENTION_MS, [
+    served.signedPreKeyId,
+  ]);
+  await store.pruneRotatedPreKeys('kyber', SIGNAL.SIGNED_PREKEY_RETENTION_MS, [
+    served.kyberPreKeyId,
+  ]);
+  return uploaded;
 }
 
 function pickPublic({ keyId, publicKey, signature }) {

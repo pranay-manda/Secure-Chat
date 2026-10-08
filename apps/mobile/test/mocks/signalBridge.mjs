@@ -4,6 +4,7 @@
  * implemented with the official libsignal Node build (same 0.105.0 release as Android).
  */
 import {
+  ErrorCode,
   Fingerprint,
   IdentityChange,
   IdentityKeyPair,
@@ -181,6 +182,13 @@ async function guard(fn) {
     return await fn();
   } catch (err) {
     if (err.code && /^[A-Z_]+$/.test(err.code)) throw err;
+    // libsignal's own error codes (Android throws the matching exception classes).
+    if (err.code === ErrorCode.DuplicatedMessage) {
+      throw codedError('DUPLICATE_MESSAGE', 'Message already processed');
+    }
+    if (err.code === ErrorCode.UntrustedIdentity) {
+      throw codedError('UNTRUSTED_IDENTITY', 'Peer identity key changed');
+    }
     const name = err?.constructor?.name ?? '';
     if (/Untrusted/i.test(name) || /untrusted identity/i.test(err.message)) {
       throw codedError('UNTRUSTED_IDENTITY', 'Peer identity key changed');

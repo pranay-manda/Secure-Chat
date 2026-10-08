@@ -159,6 +159,15 @@ function createServer() {
       },
     ],
     [
+      'POST',
+      /^\/keys\/one-time$/,
+      ({ me, body }) => {
+        const d = state.devices[USERS[me].id];
+        d.oneTime.push(...body.preKeys);
+        return { body: { status: { registered: true, oneTimePreKeyCount: d.oneTime.length } } };
+      },
+    ],
+    [
       'GET',
       /^\/keys\/bundle\/(\w+)$/,
       ({ match }) => {
@@ -525,6 +534,21 @@ describe('offline and reconnect', () => {
     expect((await conversation('B', 'A'))[0].body).toBe('while B was in the background');
     expect(server.envelopes.at(-1).delivered).toBe(true);
     expect(storage.B.pusher.disconnected).toBeFalsy(); // a new, connected client
+  });
+
+  it('returning to the foreground also runs key maintenance (pre-key top-up and rotation)', async () => {
+    const keyChecks = () =>
+      server.requests.filter((r) => r.method === 'GET' && r.path === '/keys/status').length;
+    const before = keyChecks();
+    await as('B', (app) => app.engine.handleAppStateChange('background'));
+    expect(keyChecks()).toBe(before);
+
+    // B's one-time pre-keys were used up while the app sat open.
+    server.devices[USERS.B.id].oneTime = [];
+    await as('B', (app) => app.engine.handleAppStateChange('active'));
+
+    expect(keyChecks()).toBe(before + 1);
+    expect(server.devices[USERS.B.id].oneTime.length).toBeGreaterThan(0); // topped up
   });
 
   it('sending while offline queues the message and sends it once back online', async () => {
