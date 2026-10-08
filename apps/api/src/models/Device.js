@@ -26,6 +26,16 @@ const signalKeysSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const pushTokenSchema = new mongoose.Schema(
+  {
+    token: { type: String, required: true },
+    /** Delivery service. `expo` = Expo push service, which sends through FCM V1 / APNs. */
+    provider: { type: String, enum: ['expo'], default: 'expo' },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 /**
  * One row per app install per user. `deviceId` is a UUID v4 generated on the device.
  * Revoked devices stay revoked permanently: a reinstall/re-login must use a new deviceId.
@@ -41,6 +51,11 @@ const deviceSchema = new mongoose.Schema(
     appVersion: { type: String, trim: true, maxlength: 32, default: '' },
     osVersion: { type: String, trim: true, maxlength: 32, default: '' },
     signal: { type: signalKeysSchema, default: null },
+    /**
+     * Current push token for this install (one per device; replaced on refresh, cleared on
+     * logout/revocation or when the push service reports it invalid). Never sent to clients.
+     */
+    pushToken: { type: pushTokenSchema, default: null },
     lastActiveAt: { type: Date, default: Date.now },
     revokedAt: { type: Date, default: null },
     revokedReason: { type: String, default: null },
@@ -50,5 +65,10 @@ const deviceSchema = new mongoose.Schema(
 
 deviceSchema.index({ userId: 1, deviceId: 1 }, { unique: true });
 deviceSchema.index({ userId: 1, revokedAt: 1 });
+// A token belongs to at most one device (a reinstall/new login moves it).
+deviceSchema.index(
+  { 'pushToken.token': 1 },
+  { unique: true, partialFilterExpression: { 'pushToken.token': { $type: 'string' } } },
+);
 
 export const Device = mongoose.models.Device ?? mongoose.model('Device', deviceSchema);

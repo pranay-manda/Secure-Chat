@@ -163,6 +163,8 @@ function startPolling(run) {
 }
 
 async function startRealtime(run) {
+  if (run.realtimeActive) return;
+  run.realtimeActive = true;
   useMessagingStore.setState({ realtime: 'connecting' });
   try {
     const disconnect = await connectRealtime({
@@ -171,15 +173,42 @@ async function startRealtime(run) {
       onSubscribed: () => isCurrent(run) && requestSync(),
       onStateChange: (state) => isCurrent(run) && useMessagingStore.setState({ realtime: state }),
     });
-    if (isCurrent(run)) run.cleanups.push(disconnect);
+    if (isCurrent(run) && run.realtimeActive) run.disconnectRealtime = disconnect;
     else disconnect();
   } catch (err) {
+    run.realtimeActive = false;
     // Offline or API down: polling and the next foreground/reconnect sync cover delivery.
     if (__DEV__) console.warn('[realtime] connect failed:', err?.code ?? err?.message);
     if (isCurrent(run)) {
       useMessagingStore.setState({ realtime: 'failed' });
       run.retryRealtime = true;
     }
+  }
+}
+
+/**
+ * Drops the Pusher connection. Used in the background: the server then sees no ack and sends
+ * a push notification instead (the user cannot see messages arriving in a backgrounded app),
+ * and the device does not keep a socket open.
+ */
+function stopRealtime(run) {
+  run.realtimeActive = false;
+  const disconnect = run.disconnectRealtime;
+  run.disconnectRealtime = null;
+  disconnect?.();
+}
+
+/** Background: drop Pusher (push notifications take over). Foreground: reconnect and sync. */
+export function handleAppStateChange(state) {
+  const run = engine;
+  if (!run || !isCurrent(run)) return;
+  if (state === 'background') {
+    stopRealtime(run);
+    useMessagingStore.setState({ realtime: 'paused' });
+  } else if (state === 'active') {
+    run.retryRealtime = false;
+    startRealtime(run); // no-op if still connected
+    requestSync();
   }
 }
 
@@ -200,20 +229,15 @@ export function startMessaging(userId) {
     inFlight: null,
     again: false,
     starting: null,
+    realtimeActive: false,
+    disconnectRealtime: null,
   };
   engine = run;
   useMessagingStore.setState({ realtime: 'idle', syncing: false, lastSyncError: null });
 
-  const appState = AppState.addEventListener('change', (state) => {
-    if (state === 'active' && isCurrent(run)) {
-      if (run.retryRealtime) {
-        run.retryRealtime = false;
-        startRealtime(run);
-      }
-      requestSync();
-    }
-  });
+  const appState = AppState.addEventListener('change', handleAppStateChange);
   run.cleanups.push(() => appState.remove());
+  run.cleanups.push(() => stopRealtime(run));
 
   const unsubscribeNet = NetInfo.addEventListener((net) => {
     if (!isCurrent(run)) return;

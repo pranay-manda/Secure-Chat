@@ -27,6 +27,8 @@ export const TEST_ENV = {
   JWT_ACCESS_SECRET: 'test-jwt-secret-0123456789abcdefghijklmnop',
   OTP_HMAC_SECRET: 'test-otp-secret-0123456789abcdefghijklmnop',
   EMAIL_PROVIDER: 'console',
+  // Push tests inject a fake provider; nothing ever calls the real push service.
+  PUSH_PROVIDER: 'none',
 };
 
 /** A logger whose output is captured as parsed JSON lines. */
@@ -89,7 +91,7 @@ export function createCapturingRealtime() {
   };
 }
 
-export function buildTestApp({ healthChecks, env = {}, redis, emailProvider } = {}) {
+export function buildTestApp({ healthChecks, env = {}, redis, emailProvider, pushProvider } = {}) {
   const config = loadEnv({ ...TEST_ENV, ...env });
   const { logger, lines } = createCapturingLogger();
   const sms = createFakeSms();
@@ -104,6 +106,7 @@ export function buildTestApp({ healthChecks, env = {}, redis, emailProvider } = 
     // `none` in the env switches a channel off, exactly as in production.
     smsProvider: config.sms.provider === 'none' ? null : sms,
     emailProvider: config.email.provider === 'none' ? null : (emailProvider ?? email),
+    pushProvider: pushProvider ?? null,
     realtime,
     inMemoryRateLimits: true,
   });

@@ -96,6 +96,11 @@ export const messageIdBatchSchema = z
   .max(LIMITS.MESSAGE_BATCH_MAX)
   .refine((ids) => new Set(ids).size === ids.length, 'Duplicate messageId');
 
+/** Expo push token (delivered through FCM V1 on Android), e.g. "ExponentPushToken[xxxx]". */
+export const expoPushTokenSchema = z
+  .string()
+  .regex(/^Expo(nent)?PushToken\[[A-Za-z0-9_-]{10,200}\]$/, 'Invalid push token');
+
 /** Pusher connection id, e.g. "123456.7890123". */
 export const pusherSocketIdSchema = z.string().regex(/^\d{1,20}\.\d{1,20}$/, 'Invalid socket id');
 

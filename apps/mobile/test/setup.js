@@ -205,6 +205,54 @@ jest.mock('@react-native-community/netinfo', () => ({
   fetch: jest.fn(async () => ({ isConnected: true })),
 }));
 
+/**
+ * expo-notifications test double. Per-device state lives in `globalThis.__device.notify`
+ * (permission, token, listeners) so tests can grant/deny permission and rotate tokens.
+ */
+jest.mock('expo-notifications', () => {
+  const state = () =>
+    (globalThis.__device.notify ??= {
+      permission: { granted: true, canAskAgain: true },
+      token: 'ExponentPushToken[deviceToken_0000000001]',
+      tokenListeners: new Set(),
+      requested: 0,
+      unregistered: 0,
+      handler: null,
+    });
+  return {
+    AndroidImportance: { HIGH: 4, MAX: 5 },
+    AndroidNotificationVisibility: { PRIVATE: 0 },
+    setNotificationHandler: jest.fn((handler) => {
+      globalThis.__notificationHandler = handler;
+    }),
+    setNotificationChannelAsync: jest.fn(async () => null),
+    getPermissionsAsync: jest.fn(async () => ({ ...state().permission })),
+    requestPermissionsAsync: jest.fn(async () => {
+      state().requested += 1;
+      return { ...state().permission };
+    }),
+    getExpoPushTokenAsync: jest.fn(async () => {
+      if (state().tokenError) throw state().tokenError;
+      // Like the real library: fetching a token also notifies push-token listeners with the
+      // device (FCM) token.
+      for (const listener of state().tokenListeners) {
+        setTimeout(() => listener({ type: 'android', data: `fcm:${state().token}` }), 0);
+      }
+      return { type: 'expo', data: state().token };
+    }),
+    addPushTokenListener: jest.fn((listener) => {
+      state().tokenListeners.add(listener);
+      return { remove: () => state().tokenListeners.delete(listener) };
+    }),
+    addNotificationReceivedListener: jest.fn(() => ({ remove() {} })),
+    useLastNotificationResponse: jest.fn(() => null),
+    dismissAllNotificationsAsync: jest.fn(async () => {}),
+    unregisterForNotificationsAsync: jest.fn(async () => {
+      state().unregistered += 1;
+    }),
+  };
+});
+
 // The Signal native module runs the official libsignal (Node build of the same release).
 jest.mock('../modules/signal-protocol', () => ({
   isSignalAvailable: () => true,

@@ -74,6 +74,15 @@ export async function getMessage(clientMessageId) {
   );
 }
 
+/** Peer of a message, found locally from its opaque server id (notification tap routing). */
+export async function findPeerByServerMessageId(serverMessageId) {
+  const row = await getDatabase().getFirstAsync(
+    'SELECT peer_user_id AS peerUserId FROM messages WHERE server_message_id = ?;',
+    serverMessageId,
+  );
+  return row?.peerUserId ?? null;
+}
+
 /** Messages of one conversation, newest first (what the chat screen renders). */
 export async function listChatMessages(peerUserId, limit = 200) {
   return getDatabase().getAllAsync(

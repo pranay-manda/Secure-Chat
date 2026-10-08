@@ -16,6 +16,8 @@ export const SECURE_KEYS = Object.freeze({
   DB_KEY: 'db.key',
   /** Signal long-term identity key pair + registration id (private key never leaves device). */
   SIGNAL_IDENTITY: 'signal.identity',
+  /** Push token last registered with the API for this device (removed on logout). */
+  PUSH_REGISTRATION: 'push.registration',
 });
 
 export async function getSecureItem(key) {

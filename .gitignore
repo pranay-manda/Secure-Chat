@@ -33,7 +33,11 @@ apps/mobile/modules/*/android/.cxx/
 *.keystore
 !debug.keystore
 google-services.json
+google-service.json
 GoogleService-Info.plist
+# Firebase/Google service-account private keys: server/EAS credentials, never in the repo or app
+*service-account*.json
+*serviceAccount*.json
 
 # Metro
 .metro-health-check*

@@ -27,6 +27,12 @@ export function useConversations() {
   return useLocalQuery(listConversations, []);
 }
 
+/** Total unread incoming messages (tab badge). */
+export function useUnreadTotal() {
+  const { data } = useConversations();
+  return (data ?? []).reduce((sum, c) => sum + (c.unread ?? 0), 0);
+}
+
 export function useChat(peerUserId) {
   return useLocalQuery(
     async () => ({

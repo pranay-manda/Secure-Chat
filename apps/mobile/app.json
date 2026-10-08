@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "com.securechat.app",
+      "googleServicesFile": "./google-services.json",
       "allowBackup": false,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -28,6 +29,14 @@
         "expo-sqlite",
         {
           "useSQLCipher": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/android-icon-monochrome.png",
+          "color": "#0b6e4f",
+          "defaultChannel": "messages"
         }
       ],
       "./plugins/withSqlcipherOpenssl",

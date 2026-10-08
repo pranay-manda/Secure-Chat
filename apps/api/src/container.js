@@ -3,11 +3,13 @@ import { createRateLimiters } from './middleware/rateLimit.js';
 import { createAuthService } from './modules/auth/authService.js';
 import { createOtpDelivery } from './modules/auth/otpDelivery.js';
 import { createOtpService } from './modules/auth/otpService.js';
+import { createPushNotifier } from './modules/messages/pushNotifier.js';
 import { createTokenService } from './modules/auth/tokenService.js';
 import { createDeviceService } from './modules/devices/deviceService.js';
 import { createKeyService } from './modules/keys/keyService.js';
 import { createMessageService } from './modules/messages/messageService.js';
 import { createEmailProvider } from './services/email/index.js';
+import { createPushProvider } from './services/push/index.js';
 import { createChannelAuthorizer, createRealtime } from './services/realtime/index.js';
 import { createSmsProvider } from './services/sms/index.js';
 
@@ -31,6 +33,7 @@ export function createContainer({
   redis,
   smsProvider,
   emailProvider,
+  pushProvider,
   realtime,
   inMemoryRateLimits,
 }) {
@@ -45,6 +48,11 @@ export function createContainer({
     logger,
   });
   const keyService = createKeyService({ logger });
+  const pushNotifier = createPushNotifier({
+    pushProvider: pushProvider === undefined ? createPushProvider(config.push) : pushProvider,
+    delayMs: config.push.notifyDelayMs,
+    logger,
+  });
 
   return {
     tokenService,
@@ -52,8 +60,10 @@ export function createContainer({
     keyService,
     authService: createAuthService({ otpService, tokenService, keyService, logger }),
     deviceService: createDeviceService({ logger }),
+    pushNotifier,
     messageService: createMessageService({
       realtime: realtime ?? createRealtime(config.pusher),
+      pushNotifier,
       logger,
     }),
     channelAuthorizer: createChannelAuthorizer(config.pusher),

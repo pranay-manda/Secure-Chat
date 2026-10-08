@@ -59,7 +59,7 @@ export function createDeviceService({ logger }) {
       const now = new Date();
       await Device.updateOne(
         { _id: device._id },
-        { $set: { revokedAt: now, revokedReason: 'revoked_by_user' } },
+        { $set: { revokedAt: now, revokedReason: 'revoked_by_user', pushToken: null } },
         { session },
       );
       await Session.updateMany(
@@ -73,5 +73,31 @@ export function createDeviceService({ logger }) {
     logger.info({ userId: auth.userId, self: deviceId === auth.deviceId }, 'Device revoked');
   }
 
-  return { registerCurrentDevice, listDevices, revokeDevice };
+  /**
+   * Stores the push token of the caller's device. Idempotent (a refresh with the same token is a
+   * no-op apart from the timestamp); a token previously held by another device is moved here,
+   * so one token never notifies two devices.
+   */
+  async function setPushToken(auth, token) {
+    await Device.updateMany(
+      { 'pushToken.token': token, deviceId: mongoose.trusted({ $ne: auth.deviceId }) },
+      { $set: { pushToken: null } },
+    );
+    const result = await Device.updateOne(
+      { userId: auth.userId, deviceId: auth.deviceId, revokedAt: null },
+      { $set: { pushToken: { token, provider: 'expo', updatedAt: new Date() } } },
+    );
+    if (result.matchedCount === 0) {
+      throw new HttpError(401, ERROR_CODE.DEVICE_REVOKED, 'This device was signed out');
+    }
+  }
+
+  async function clearPushToken(auth) {
+    await Device.updateOne(
+      { userId: auth.userId, deviceId: auth.deviceId },
+      { $set: { pushToken: null } },
+    );
+  }
+
+  return { registerCurrentDevice, listDevices, revokeDevice, setPushToken, clearPushToken };
 }

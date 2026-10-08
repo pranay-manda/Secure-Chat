@@ -1,14 +1,9 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-export const colors = {
-  primary: '#0b6e4f',
-  primaryPressed: '#095c42',
-  text: '#1b1f23',
-  muted: '#5f6b76',
-  border: '#d0d7de',
-  danger: '#cf222e',
-  surface: '#f6f8fa',
-};
+import { colors } from '../theme';
+
+// Re-exported so existing screens keep importing colours from here.
+export { colors };
 
 export function PrimaryButton({ title, onPress, loading = false, disabled = false }) {
   const inactive = disabled || loading;

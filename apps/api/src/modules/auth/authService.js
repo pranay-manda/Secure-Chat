@@ -77,7 +77,7 @@ export function createAuthService({ otpService, tokenService, keyService, logger
       // v1 policy: one active device per user. Signing in here signs out everywhere else.
       await Device.updateMany(
         { userId, deviceId: mongoose.trusted({ $ne: device.deviceId }), revokedAt: null },
-        { $set: { revokedAt: now, revokedReason: 'replaced_by_new_login' } },
+        { $set: { revokedAt: now, revokedReason: 'replaced_by_new_login', pushToken: null } },
         { session },
       );
       await Session.updateMany(
@@ -226,8 +226,10 @@ export function createAuthService({ otpService, tokenService, keyService, logger
     };
   }
 
-  async function logout({ sessionId }) {
+  /** Ends the session and stops push notifications to this device. */
+  async function logout({ sessionId, userId, deviceId }) {
     await revokeSession(sessionId, 'logout');
+    await Device.updateOne({ userId, deviceId }, { $set: { pushToken: null } });
   }
 
   return { loginWithOtp, refresh, logout };

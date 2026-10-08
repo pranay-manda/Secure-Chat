@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { deviceIdSchema } from '@secure-chat/shared/validation';
+import { deviceIdSchema, expoPushTokenSchema } from '@secure-chat/shared/validation';
 import { z } from 'zod';
 
 import { validate } from '../../middleware/validate.js';
@@ -17,6 +17,21 @@ export function createDevicesRouter({ deviceService, rateLimiters, authenticate 
 
   router.get('/', async (req, res) => {
     res.status(200).json({ devices: await deviceService.listDevices(req.auth) });
+  });
+
+  // Push token of the calling device (register or refresh). Never returned by any endpoint.
+  router.post(
+    '/push-token',
+    validate({ body: z.strictObject({ token: expoPushTokenSchema }) }),
+    async (req, res) => {
+      await deviceService.setPushToken(req.auth, req.valid.body.token);
+      res.status(204).end();
+    },
+  );
+
+  router.delete('/push-token', async (req, res) => {
+    await deviceService.clearPushToken(req.auth);
+    res.status(204).end();
   });
 
   router.delete(

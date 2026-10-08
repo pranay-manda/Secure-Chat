@@ -19,7 +19,7 @@ function statusOf(message) {
  * Accepts already-encrypted Signal envelopes and routes them to the recipient device.
  * The server validates authorization and shape only; it cannot read message content.
  */
-export function createMessageService({ realtime, logger }) {
+export function createMessageService({ realtime, pushNotifier, logger }) {
   function toClientEnvelope(envelope) {
     return {
       envelopeId: String(envelope._id),
@@ -137,6 +137,8 @@ export function createMessageService({ realtime, logger }) {
 
     // After commit: realtime is best effort, MongoDB already has the envelope.
     await publishEnvelope(realtime, logger, created.envelope);
+    // Push only if the device does not ack via realtime shortly (closed/backgrounded app).
+    pushNotifier?.schedule(created.envelope);
     return toSendResult(created.message, created.envelope, false);
   }
 

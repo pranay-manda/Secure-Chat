@@ -376,14 +376,21 @@ afterEach(() => {
 
 describe('conversations', () => {
   it('creates a conversation locally with an optional nickname', async () => {
-    await as('A', (app) => app.engine.createConversation(USERS.B.id, '  Bob  '));
+    // Spaces/punctuation cannot occur in base64 key material, so the leak check is exact.
+    const nickname = 'Bob (work phone)';
+    await as('A', (app) => app.engine.createConversation(USERS.B.id, `  ${nickname}  `));
 
     const list = await as('A', (app) => app.messages.listConversations());
     expect(list).toEqual([
-      expect.objectContaining({ peerUserId: USERS.B.id, title: 'Bob', lastBody: null, unread: 0 }),
+      expect.objectContaining({
+        peerUserId: USERS.B.id,
+        title: nickname,
+        lastBody: null,
+        unread: 0,
+      }),
     ]);
     // Local only: nothing about the conversation or nickname was sent to the server.
-    expect(server.requests.map((r) => r.body).join()).not.toContain('Bob');
+    expect(server.requests.map((r) => r.body).join()).not.toContain(nickname);
   });
 });
 
@@ -485,6 +492,22 @@ describe('offline and reconnect', () => {
     await as('B', () => storage.B.pusher.reconnect());
 
     expect((await conversation('B', 'A'))[0].body).toBe('sent while B was disconnected');
+  });
+
+  it('drops Pusher in the background (so the server pushes) and catches up in the foreground', async () => {
+    await as('B', (app) => app.engine.handleAppStateChange('background'));
+    expect(storage.B.pusher.disconnected).toBe(true);
+    expect(apps.B.engine.useMessagingStore.getState().realtime).toBe('paused');
+
+    await send('A', 'B', 'while B was in the background');
+    await deliverRealtime('B'); // not connected: realtime event missed, no ack sent
+    expect(server.envelopes.at(-1).delivered).toBe(false);
+
+    await as('B', (app) => app.engine.handleAppStateChange('active'));
+
+    expect((await conversation('B', 'A'))[0].body).toBe('while B was in the background');
+    expect(server.envelopes.at(-1).delivered).toBe(true);
+    expect(storage.B.pusher.disconnected).toBeFalsy(); // a new, connected client
   });
 
   it('sending while offline queues the message and sends it once back online', async () => {

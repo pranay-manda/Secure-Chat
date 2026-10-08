@@ -74,6 +74,14 @@ const envSchema = z
       )
       .optional(),
 
+    // --- Push notifications (Expo push service -> FCM V1; credentials live in the EAS project) ---
+    /** `expo` sends through Expo's push service; `none` disables push notifications. */
+    PUSH_PROVIDER: z.enum(['expo', 'none']).default('expo'),
+    /** Only needed if "enhanced push security" is enabled in the Expo project. */
+    EXPO_ACCESS_TOKEN: z.string().min(20).optional(),
+    /** Wait this long for the device to ack over realtime before sending a push. */
+    PUSH_NOTIFY_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(3000),
+
     // --- Realtime (Pusher Channels). All four or none; without them clients rely on sync. ---
     PUSHER_APP_ID: z.string().min(1).optional(),
     PUSHER_KEY: z.string().min(1).optional(),
@@ -225,6 +233,11 @@ export function loadEnv(source = process.env) {
       resendApiKey: env.RESEND_API_KEY,
       from: env.RESEND_FROM_EMAIL,
       otpTtlSeconds: env.OTP_TTL_SECONDS,
+    }),
+    push: Object.freeze({
+      provider: env.PUSH_PROVIDER,
+      accessToken: env.EXPO_ACCESS_TOKEN,
+      notifyDelayMs: env.PUSH_NOTIFY_DELAY_MS,
     }),
     pusher: env.PUSHER_APP_ID
       ? Object.freeze({

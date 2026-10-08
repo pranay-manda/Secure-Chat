@@ -3,6 +3,7 @@ import { randomUUID } from 'expo-crypto';
 import { destroyDatabase, getMeta, openDatabase, setMeta } from '../db/database';
 import { resetDeviceId } from '../lib/deviceId';
 import { stopMessaging } from '../messaging/messagingEngine';
+import { unregisterPushNotifications } from '../notifications/pushNotifications';
 import { deleteSecureItem, getSecureItem, SECURE_KEYS, setSecureItem } from '../lib/secureStorage';
 import { clearSession, loadSession, saveSession, sessionFromTokens } from './tokenStore';
 
@@ -63,6 +64,7 @@ export async function restoreSession() {
 export async function wipeLocalSession({ newDeviceId = false } = {}) {
   // Stop realtime and sync first so nothing writes into the database while it is destroyed.
   stopMessaging();
+  await unregisterPushNotifications().catch(() => {});
   await clearSession();
   await destroyDatabase();
   await deleteSecureItem(SECURE_KEYS.INSTALL_ID);
