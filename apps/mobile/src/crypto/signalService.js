@@ -4,7 +4,7 @@ import { randomUUID } from 'expo-crypto';
 import { getSignalNative } from '../../modules/signal-protocol';
 import { ApiError, apiRequest, NetworkError } from '../lib/api';
 import * as messages from '../messaging/messageStore';
-import { LOCAL_STATUS } from '../messaging/messageStore';
+import { LOCAL_STATUS, UNTRUSTED_IDENTITY } from '../messaging/messageStore';
 import { base64ToUtf8, utf8ToBase64 } from './encoding';
 import * as store from './signalStore';
 
@@ -102,19 +102,36 @@ function pickPublic({ keyId, publicKey, signature }) {
   return { keyId, publicKey, signature };
 }
 
-/** Starts a session with a peer from their public pre-key bundle (PQXDH via libsignal). */
+/** Error raised when a peer's identity key changed and the user has not accepted it yet. */
+function untrustedIdentityError() {
+  const err = new Error("The contact's security code changed");
+  err.code = UNTRUSTED_IDENTITY;
+  return err;
+}
+
+/**
+ * Starts a session with a peer from their public pre-key bundle (PQXDH via libsignal).
+ * libsignal refuses a bundle whose identity key differs from the trusted one; that change is
+ * recorded for the user to review and the trusted key is left as it is.
+ */
 async function establishSession(local, peerUserId) {
   const { bundle } = await apiRequest('GET', `/keys/bundle/${peerUserId}`);
   const address = store.addressOf(peerUserId, bundle.signalDeviceId);
-  const result = await getSignalNative().processPreKeyBundle(
-    local,
-    {
-      name: peerUserId,
-      deviceId: bundle.signalDeviceId,
-      identityKey: await store.loadPeerIdentity(address),
-    },
-    bundle,
-  );
+  const trustedIdentityKey = await store.loadPeerIdentity(address);
+  let result;
+  try {
+    result = await getSignalNative().processPreKeyBundle(
+      local,
+      { name: peerUserId, deviceId: bundle.signalDeviceId, identityKey: trustedIdentityKey },
+      bundle,
+    );
+  } catch (err) {
+    if (err?.code === UNTRUSTED_IDENTITY) {
+      await store.recordIdentityChange(peerUserId, address, trustedIdentityKey, bundle.identityKey);
+      throw untrustedIdentityError();
+    }
+    throw err;
+  }
   await store.inTransaction(async () => {
     await store.saveSession(address, result.session);
     await store.savePeerIdentityIfNew(address, result.remoteIdentityKey);
@@ -152,8 +169,10 @@ function encryptToOutbox(myUserId, message) {
   return withSignalLock(async () => {
     const existing = await messages.loadOutbox(message.clientMessageId);
     if (existing) return existing;
-    const local = await localContext(myUserId);
     const peerUserId = message.peerUserId;
+    // Nothing is encrypted for a peer whose new security code is still undecided.
+    if (await store.getPendingIdentityChange(peerUserId)) throw untrustedIdentityError();
+    const local = await localContext(myUserId);
     let peer = await store.loadPeerDevice(peerUserId);
     const hasSession =
       peer && (await store.loadSession(store.addressOf(peerUserId, peer.signalDeviceId)));
@@ -174,6 +193,7 @@ function encryptToOutbox(myUserId, message) {
       clientMessageId: message.clientMessageId,
       recipientUserId: peerUserId,
       recipientDeviceId: peer.deviceId,
+      recipientRegistrationId: encrypted.remoteRegistrationId ?? null,
       type: encrypted.type,
       ciphertext: encrypted.body,
     };
@@ -213,6 +233,10 @@ async function attemptDelivery(myUserId, clientMessageId, { retryOnStale = true 
       body: {
         recipientUserId: entry.recipientUserId,
         recipientDeviceId: entry.recipientDeviceId,
+        // Lets the server reject ciphertext for keys the recipient no longer has (re-login).
+        ...(entry.recipientRegistrationId != null
+          ? { recipientRegistrationId: entry.recipientRegistrationId }
+          : {}),
         clientMessageId,
         type: entry.type,
         ciphertext: entry.ciphertext,
@@ -325,13 +349,16 @@ async function processEnvelope(local, envelope) {
       await store.markEnvelope(envelope.envelopeId, 'done', code);
       return { ok: false, code };
     }
+    if (code === UNTRUSTED_IDENTITY) {
+      const held = await holdForIdentityChange(envelope, address);
+      if (held) return held;
+    }
     // Keep a visible placeholder so the user knows a message arrived but could not be read.
     // The plaintext was never available; nothing is retried with different keys.
     await store.inTransaction(async () => {
-      await store.insertMessage({
+      await store.saveIncomingMessage({
         serverMessageId: envelope.messageId,
         peerUserId: envelope.senderUserId,
-        direction: 'in',
         body: '',
         status: LOCAL_STATUS.UNDECRYPTABLE,
         error: code,
@@ -353,10 +380,9 @@ async function processEnvelope(local, envelope) {
       envelope.senderSignalDeviceId,
     );
     if (result.usedPreKeyId != null) await store.removePreKey(result.usedPreKeyId);
-    await store.insertMessage({
+    await store.saveIncomingMessage({
       serverMessageId: envelope.messageId,
       peerUserId: envelope.senderUserId,
-      direction: 'in',
       body: base64ToUtf8(result.plaintext),
       status: LOCAL_STATUS.RECEIVED,
       createdAt: serverTime(envelope),
@@ -365,6 +391,40 @@ async function processEnvelope(local, envelope) {
     await store.markEnvelope(envelope.envelopeId, 'done');
   });
   return { ok: true };
+}
+
+/**
+ * libsignal refused an incoming message because the sender's identity key differs from the
+ * trusted one. Nothing is decrypted and nothing is trusted: the ciphertext stays in the local
+ * inbox (status `identity_pending`), the change is recorded for the user to review, and a
+ * placeholder shows that a message is waiting. No read receipt can be sent for it (it is never
+ * `received`). Returns null if the new key cannot be determined (then the message is handled
+ * as undecryptable, as before). Must run under the Signal lock.
+ */
+async function holdForIdentityChange(envelope, address) {
+  const claimed =
+    envelope.type === CIPHERTEXT_TYPE.PREKEY
+      ? (await getSignalNative().preKeyMessageInfo(envelope.ciphertext)).identityKey
+      : null;
+  const trusted = await store.loadPeerIdentity(address);
+  if (!claimed || !trusted || claimed === trusted) return null;
+  await store.inTransaction(async () => {
+    await store.recordIdentityChange(envelope.senderUserId, address, trusted, claimed, {
+      at: serverTime(envelope),
+    });
+    await store.insertMessage({
+      serverMessageId: envelope.messageId,
+      peerUserId: envelope.senderUserId,
+      direction: 'in',
+      body: '',
+      status: LOCAL_STATUS.IDENTITY_PENDING,
+      error: UNTRUSTED_IDENTITY,
+      createdAt: serverTime(envelope),
+    });
+    await messages.ensureConversation(envelope.senderUserId, { at: serverTime(envelope) });
+    await store.markEnvelope(envelope.envelopeId, 'identity_pending', UNTRUSTED_IDENTITY);
+  });
+  return { ok: false, code: UNTRUSTED_IDENTITY };
 }
 
 /** Server timestamp of an envelope (consistent ordering across devices), else local time. */
@@ -444,6 +504,78 @@ export async function handleRealtimeEnvelope(myUserId, payload) {
   // sync again so the new envelope is acknowledged.
   if (inboxSyncInFlight) await inboxSyncInFlight.catch(() => {});
   return syncInbox(myUserId);
+}
+
+// --- Security code (identity verification) ---
+
+/** The undecided identity change for a peer (`{ id, newIdentityKey, ... }`) or null. */
+export const getPendingIdentityChange = store.getPendingIdentityChange;
+export const listIdentityChanges = store.listIdentityChanges;
+
+/**
+ * The security code (Signal safety number, 60 digits) for this user and a peer, computed by
+ * libsignal from both identity public keys. While a change is pending it is the code for the
+ * peer's NEW key (the one the user is asked to accept). Null if the peer's key is not known yet.
+ *
+ * @returns {Promise<{ code: string, identityKey: string, pending: boolean } | null>}
+ */
+export async function getSecurityCode(myUserId, peerUserId) {
+  const pending = await store.getPendingIdentityChange(peerUserId);
+  const peer = await store.loadPeerDevice(peerUserId);
+  const peerKey =
+    pending?.newIdentityKey ??
+    (await store.loadPeerIdentity(
+      store.addressOf(peerUserId, peer?.signalDeviceId ?? SIGNAL.DEFAULT_DEVICE_ID),
+    ));
+  const identity = await store.loadIdentity();
+  if (!peerKey || !identity) return null;
+  const code = await getSignalNative().securityCode(
+    SIGNAL.SECURITY_CODE_ITERATIONS,
+    SIGNAL.SECURITY_CODE_VERSION,
+    myUserId,
+    identity.identityKey,
+    peerUserId,
+    peerKey,
+  );
+  return { code, identityKey: peerKey, pending: Boolean(pending) };
+}
+
+/**
+ * The user explicitly accepted a peer's new security code. `expectedIdentityKey` is the key
+ * whose code the user was shown: if the pending key changed in the meantime nothing happens.
+ *
+ * In one transaction: the new key becomes the trusted key, the old session (built for the
+ * old key) and the cached device are dropped, unsent ciphertext for the old session is
+ * discarded, and held incoming envelopes are queued again. Then the held envelopes are
+ * decrypted (libsignal builds the new session from the peer's PreKeySignalMessage) and held
+ * outgoing messages are encrypted and sent (with a fresh bundle if no session exists).
+ * Idempotent: a second call finds no pending change and returns false.
+ */
+export async function acceptIdentityChange(myUserId, peerUserId, expectedIdentityKey) {
+  const accepted = await withSignalLock(async () => {
+    const change = await store.getPendingIdentityChange(peerUserId);
+    if (!change || change.newIdentityKey !== expectedIdentityKey) return false;
+    await store.inTransaction(async () => {
+      await store.replacePeerIdentity(change.address, change.newIdentityKey);
+      await store.deleteSession(change.address);
+      await store.deletePeerDevice(peerUserId);
+      await messages.deleteOutboxFor(peerUserId);
+      await store.markIdentityChangeAccepted(change.id);
+      await store.requeueIdentityPendingEnvelopes(peerUserId);
+    });
+    return true;
+  });
+  if (!accepted) return false;
+
+  await processPendingEnvelopes(myUserId);
+  for (const clientMessageId of await messages.listHeldForIdentity(peerUserId)) {
+    try {
+      await deliverOutgoing(myUserId, clientMessageId);
+    } catch {
+      // Stays failed (shown in the chat); temporary failures are retried by the next sync.
+    }
+  }
+  return true;
 }
 
 export const listConversation = store.listMessages;

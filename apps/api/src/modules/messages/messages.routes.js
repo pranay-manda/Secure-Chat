@@ -8,6 +8,7 @@ import {
   messageIdBatchSchema,
   objectIdSchema,
   pageSizeSchema,
+  registrationIdSchema,
 } from '@secure-chat/shared/validation';
 import { z } from 'zod';
 
@@ -17,6 +18,9 @@ import { validate } from '../../middleware/validate.js';
 const sendBody = z.strictObject({
   recipientUserId: objectIdSchema,
   recipientDeviceId: deviceIdSchema,
+  // Public registration id of the recipient keys the sender's session was built for (optional
+  // for older clients). A mismatch means the recipient re-registered: see sendEnvelope.
+  recipientRegistrationId: registrationIdSchema.optional(),
   clientMessageId: clientMessageIdSchema,
   type: ciphertextTypeSchema,
   ciphertext: ciphertextSchema,

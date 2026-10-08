@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { getPendingIdentityChange, listIdentityChanges } from '../crypto/signalService';
 import {
   getConversation,
   listChatMessages,
@@ -49,11 +50,18 @@ export function useUnreadTotal() {
   return (data ?? []).reduce((sum, c) => sum + (c.unread ?? 0), 0);
 }
 
+/**
+ * One conversation: its messages, plus its security state. `identityChange` is the undecided
+ * change of the contact's security code (or null); `identityEvents` are past and pending
+ * changes, shown as notices in the chat.
+ */
 export function useChat(peerUserId) {
   return useLocalQuery(
     async () => ({
       conversation: await getConversation(peerUserId),
       messages: await listChatMessages(peerUserId),
+      identityChange: await getPendingIdentityChange(peerUserId),
+      identityEvents: await listIdentityChanges(peerUserId),
     }),
     [peerUserId],
   );

@@ -103,6 +103,12 @@ export const SIGNAL = Object.freeze({
   MAX_REGISTRATION_ID: 16380,
   /** Upper bound for one encrypted envelope (text messages are far smaller). */
   MAX_CIPHERTEXT_BYTES: 64 * 1024,
+  /**
+   * Security code (libsignal NumericFingerprintGenerator): hash iterations and format version.
+   * Both phones must use the same values to show the same 60-digit code.
+   */
+  SECURITY_CODE_ITERATIONS: 5200,
+  SECURITY_CODE_VERSION: 2,
 });
 
 /** libsignal CiphertextMessage types carried in envelopes. */

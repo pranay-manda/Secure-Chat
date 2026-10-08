@@ -20,6 +20,9 @@ function Preview({ item }) {
   if (item.lastStatus === 'undecryptable') {
     return <Text style={styles.previewMuted}>🔒 Message could not be decrypted</Text>;
   }
+  if (item.lastStatus === 'identity_pending') {
+    return <Text style={styles.previewMuted}>🛡 Security code changed</Text>;
+  }
   if (item.lastBody == null) return <Text style={styles.previewMuted}>No messages yet</Text>;
   const status = item.lastDirection === 'out' ? STATUS_ICON[item.lastStatus] : null;
   return (

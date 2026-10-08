@@ -85,8 +85,13 @@ export function createMessageService({ realtime, pushNotifier, logger }) {
     if (!sender.signal) {
       throw new HttpError(409, ERROR_CODE.KEYS_NOT_REGISTERED, 'Register device keys first');
     }
-    if (!recipient?.signal) {
-      // Recipient re-installed / switched device: sender must fetch a fresh bundle.
+    const reRegistered =
+      input.recipientRegistrationId !== undefined &&
+      recipient?.signal?.registrationId !== input.recipientRegistrationId;
+    if (!recipient?.signal || reRegistered) {
+      // Recipient re-installed / switched device, or signed in again on the same install (new
+      // keys under the same device id, so the sender's session is for keys that no longer
+      // exist): the sender must fetch a fresh bundle. Nothing is stored.
       throw new HttpError(
         409,
         ERROR_CODE.STALE_RECIPIENT_DEVICE,

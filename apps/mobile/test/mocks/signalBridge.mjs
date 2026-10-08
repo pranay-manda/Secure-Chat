@@ -4,6 +4,7 @@
  * implemented with the official libsignal Node build (same 0.105.0 release as Android).
  */
 import {
+  Fingerprint,
   IdentityChange,
   IdentityKeyPair,
   IdentityKeyStore,
@@ -120,8 +121,59 @@ function context(local, remote) {
     result: () => ({
       session: state.session ? b64(state.session.serialize()) : null,
       remoteIdentityKey: state.remoteIdentity ? b64(state.remoteIdentity.serialize()) : null,
+      remoteRegistrationId: remoteRegistrationIdOf(state.session),
     }),
   };
+}
+
+function remoteRegistrationIdOf(session) {
+  try {
+    return session ? session.remoteRegistrationId() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The sender identity key a PreKeySignalMessage claims. The Node build has no accessor for it
+ * (Android has PreKeySignalMessage.getIdentityKey()), so libsignal itself is asked: it hands the
+ * key to IdentityKeyStore.isTrustedIdentity before using any other state, and answering "not
+ * trusted" stops processing right there.
+ */
+async function claimedIdentityKey(message) {
+  let claimed = null;
+  const address = ProtocolAddress.new('probe', 1);
+  const probe = new (class extends IdentityKeyStore {
+    async getIdentityKey() {
+      return PrivateKey.generate();
+    }
+    async getLocalRegistrationId() {
+      return 1;
+    }
+    async saveIdentity() {
+      return IdentityChange.NewOrUnchanged;
+    }
+    async isTrustedIdentity(_address, key) {
+      claimed = key;
+      return false;
+    }
+    async getIdentity() {
+      return null;
+    }
+  })();
+  const none = new (class extends SessionStore {
+    async saveSession() {}
+    async getSession() {
+      return null;
+    }
+    async getExistingSessions() {
+      return [];
+    }
+  })();
+  await signalDecryptPreKey(message, address, address, none, probe, null, null, null).catch(
+    () => {},
+  );
+  return claimed;
 }
 
 async function guard(fn) {
@@ -189,7 +241,28 @@ export const bridge = {
 
   async preKeyMessageInfo(body) {
     const message = PreKeySignalMessage.deserialize(unb64(body));
-    return { preKeyId: message.preKeyId(), signedPreKeyId: message.signedPreKeyId() };
+    const identityKey = await claimedIdentityKey(message);
+    return {
+      preKeyId: message.preKeyId(),
+      signedPreKeyId: message.signedPreKeyId(),
+      identityKey: identityKey ? b64(identityKey.serialize()) : null,
+      registrationId: message.registrationId(),
+    };
+  },
+
+  async securityCode(iterations, version, localName, localKey, remoteName, remoteKey) {
+    return guard(async () =>
+      Fingerprint.new(
+        iterations,
+        version,
+        new Uint8Array(Buffer.from(localName, 'utf8')),
+        PublicKey.deserialize(unb64(localKey)),
+        new Uint8Array(Buffer.from(remoteName, 'utf8')),
+        PublicKey.deserialize(unb64(remoteKey)),
+      )
+        .displayableFingerprint()
+        .toString(),
+    );
   },
 
   async processPreKeyBundle(local, remote, bundle) {

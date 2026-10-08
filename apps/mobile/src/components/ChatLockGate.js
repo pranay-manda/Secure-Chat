@@ -73,7 +73,9 @@ export function ChatLockGate({ peerUserId, children }) {
 
   return (
     <View style={styles.container} testID="chat-lock-gate">
-      <Stack.Screen options={{ headerTitle: 'Locked chat', headerRight: () => null }} />
+      {locked === true ? (
+        <Stack.Screen options={{ headerTitle: 'Locked chat', headerRight: () => null }} />
+      ) : null}
       {locked === null ? (
         <ActivityIndicator color={colors.primary} />
       ) : (

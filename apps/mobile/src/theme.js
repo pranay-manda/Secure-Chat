@@ -21,6 +21,7 @@ export const colors = {
   danger: '#cf222e',
   read: '#1f6feb',
   notice: '#fff8c5',
+  warning: '#9a6700',
 };
 
 /** Avatar backgrounds, picked deterministically from the user id (no random colours). */

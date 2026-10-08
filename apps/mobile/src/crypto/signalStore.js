@@ -136,6 +136,94 @@ export async function savePeerIdentityIfNew(address, identityKey) {
   );
 }
 
+// --- Identity changes ("security code changed") ---
+
+/** The undecided identity change for a peer, or null. */
+export async function getPendingIdentityChange(peerUserId) {
+  return getDatabase().getFirstAsync(
+    `SELECT id, peer_user_id AS peerUserId, address, previous_identity_key AS previousIdentityKey,
+            new_identity_key AS newIdentityKey, detected_at AS detectedAt
+       FROM identity_changes WHERE peer_user_id = ? AND status = 'pending';`,
+    peerUserId,
+  );
+}
+
+/**
+ * Records that a peer presented `newIdentityKey` while `trustedIdentityKey` is trusted. The
+ * trusted key is NOT touched. If a change is already pending, it now refers to the latest key.
+ * `at` is when the change happened (for an incoming message: its server time), so the chat
+ * shows the notice before the first message with the new key.
+ */
+export async function recordIdentityChange(
+  peerUserId,
+  address,
+  trustedIdentityKey,
+  newIdentityKey,
+  { at = now() } = {},
+) {
+  if (!newIdentityKey || !trustedIdentityKey || newIdentityKey === trustedIdentityKey) return;
+  const db = getDatabase();
+  const pending = await getPendingIdentityChange(peerUserId);
+  if (pending) {
+    if (pending.newIdentityKey === newIdentityKey) return;
+    await db.runAsync(
+      'UPDATE identity_changes SET new_identity_key = ?, address = ?, detected_at = ? WHERE id = ?;',
+      newIdentityKey,
+      address,
+      at,
+      pending.id,
+    );
+    return;
+  }
+  await db.runAsync(
+    `INSERT INTO identity_changes
+       (peer_user_id, address, previous_identity_key, new_identity_key, status, detected_at)
+     VALUES (?, ?, ?, ?, 'pending', ?);`,
+    peerUserId,
+    address,
+    trustedIdentityKey,
+    newIdentityKey,
+    at,
+  );
+}
+
+/** Makes `identityKey` the trusted key for `address` (only after the user accepted it). */
+export async function replacePeerIdentity(address, identityKey) {
+  await getDatabase().runAsync(
+    'INSERT OR REPLACE INTO signal_identities (address, identity_key, first_seen_at) VALUES (?, ?, ?);',
+    address,
+    identityKey,
+    now(),
+  );
+}
+
+export async function markIdentityChangeAccepted(id) {
+  await getDatabase().runAsync(
+    "UPDATE identity_changes SET status = 'accepted', resolved_at = ? WHERE id = ?;",
+    now(),
+    id,
+  );
+}
+
+/** Identity-change events of one conversation (timeline notices), oldest first. */
+export async function listIdentityChanges(peerUserId) {
+  return getDatabase().getAllAsync(
+    `SELECT id, status, detected_at AS detectedAt, resolved_at AS resolvedAt
+       FROM identity_changes WHERE peer_user_id = ? ORDER BY detected_at ASC;`,
+    peerUserId,
+  );
+}
+
+/** Puts a peer's held envelopes back in the inbox queue (after their new key was accepted). */
+export async function requeueIdentityPendingEnvelopes(senderUserId) {
+  const result = await getDatabase().runAsync(
+    `UPDATE message_envelopes SET status = 'pending', error = NULL
+      WHERE sender_user_id = ? AND status = 'identity_pending';`,
+    senderUserId,
+  );
+  return result.changes;
+}
+
 export async function loadPeerDevice(userId) {
   return getDatabase().getFirstAsync(
     'SELECT device_id AS deviceId, signal_device_id AS signalDeviceId FROM peer_devices WHERE user_id = ?;',
@@ -214,6 +302,28 @@ export async function insertMessage(message) {
     message.serverMessageId ?? null,
     message.peerUserId,
     message.direction,
+    message.body,
+    message.status,
+    message.error ?? null,
+    message.createdAt ?? now(),
+  );
+}
+
+/**
+ * Stores a decrypted incoming message. If the message was held as an `identity_pending`
+ * placeholder (sender's security code changed), that same row becomes the message: no
+ * duplicate, same position in the chat. Any other existing row is left untouched.
+ */
+export async function saveIncomingMessage(message) {
+  await getDatabase().runAsync(
+    `INSERT INTO messages
+       (server_message_id, peer_user_id, direction, body, status, error, created_at)
+       VALUES (?, ?, 'in', ?, ?, ?, ?)
+     ON CONFLICT(server_message_id) DO UPDATE SET
+       body = excluded.body, status = excluded.status, error = excluded.error
+     WHERE messages.status = 'identity_pending';`,
+    message.serverMessageId,
+    message.peerUserId,
     message.body,
     message.status,
     message.error ?? null,

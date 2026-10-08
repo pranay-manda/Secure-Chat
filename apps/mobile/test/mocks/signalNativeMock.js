@@ -53,6 +53,7 @@ const signalNativeMock = Object.fromEntries(
     'processPreKeyBundle',
     'encrypt',
     'decrypt',
+    'securityCode',
   ].map((name) => [name, call(name)]),
 );
 

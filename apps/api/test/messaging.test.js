@@ -138,6 +138,42 @@ describe('POST /messages', () => {
     expect(await Message.countDocuments()).toBe(0);
   });
 
+  it('rejects ciphertext for keys the recipient no longer has (signed in again, same device)', async () => {
+    const base = {
+      recipientUserId: bob.auth.userId,
+      recipientDeviceId: bob.auth.deviceId,
+      type: 2,
+      ciphertext: Buffer.from('opaque').toString('base64'),
+    };
+    const current = bob.state.registrationId;
+    const other = (current % 16380) + 1;
+
+    const stale = await api(alice).post('/messages', {
+      ...base,
+      clientMessageId: randomUUID(),
+      recipientRegistrationId: other,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error.code).toBe('STALE_RECIPIENT_DEVICE');
+    expect(await Message.countDocuments()).toBe(0);
+
+    // Matching registration id, or none at all (older apps): accepted as before.
+    for (const extra of [{ recipientRegistrationId: current }, {}]) {
+      const ok = await api(alice).post('/messages', {
+        ...base,
+        clientMessageId: randomUUID(),
+        ...extra,
+      });
+      expect(ok.status).toBe(201);
+    }
+    const invalid = await api(alice).post('/messages', {
+      ...base,
+      clientMessageId: randomUUID(),
+      recipientRegistrationId: 0,
+    });
+    expect(invalid.status).toBe(400);
+  });
+
   it('rejects invalid payloads and plaintext fields', async () => {
     const valid = {
       recipientUserId: bob.auth.userId,

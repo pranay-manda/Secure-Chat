@@ -4,6 +4,7 @@ import { AppState } from 'react-native';
 import { create } from 'zustand';
 
 import {
+  acceptIdentityChange,
   deliverOutgoing,
   enqueueText,
   flushOutbox,
@@ -306,6 +307,19 @@ export async function retryFailedMessage(userId, clientMessageId) {
     await retryMessage(userId, clientMessageId);
   } catch {
     // Still failed; state is shown in the chat.
+  } finally {
+    bump();
+  }
+}
+
+/**
+ * The user accepted a contact's new security code (`identityKey` = the key whose code was
+ * shown). Held messages are then decrypted and held outgoing messages sent.
+ * @returns {Promise<boolean>} false if there was nothing (or something else) to accept
+ */
+export async function acceptSecurityCode(userId, peerUserId, identityKey) {
+  try {
+    return await acceptIdentityChange(userId, peerUserId, identityKey);
   } finally {
     bump();
   }

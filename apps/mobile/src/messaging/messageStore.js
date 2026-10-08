@@ -16,7 +16,12 @@ export const LOCAL_STATUS = Object.freeze({
   FAILED: 'failed',
   RECEIVED: 'received',
   UNDECRYPTABLE: 'undecryptable',
+  /** Incoming, encrypted with a new identity key the user has not accepted yet (held). */
+  IDENTITY_PENDING: 'identity_pending',
 });
+
+/** Error of an outgoing message held because the peer's security code changed. */
+export const UNTRUSTED_IDENTITY = 'UNTRUSTED_IDENTITY';
 
 const OUTGOING_RANK = { sending: 0, failed: 0, sent: 1, delivered: 2, read: 3 };
 
@@ -261,7 +266,8 @@ export async function clearPendingReadReceipts(serverMessageIds) {
 export async function loadOutbox(clientMessageId) {
   return getDatabase().getFirstAsync(
     `SELECT client_message_id AS clientMessageId, recipient_user_id AS recipientUserId,
-            recipient_device_id AS recipientDeviceId, type, ciphertext
+            recipient_device_id AS recipientDeviceId,
+            recipient_registration_id AS recipientRegistrationId, type, ciphertext
        FROM outbox WHERE client_message_id = ?;`,
     clientMessageId,
   );
@@ -270,15 +276,34 @@ export async function loadOutbox(clientMessageId) {
 export async function saveOutbox(entry) {
   await getDatabase().runAsync(
     `INSERT OR REPLACE INTO outbox
-       (client_message_id, recipient_user_id, recipient_device_id, type, ciphertext, created_at)
-     VALUES (?, ?, ?, ?, ?, ?);`,
+       (client_message_id, recipient_user_id, recipient_device_id, recipient_registration_id,
+        type, ciphertext, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?);`,
     entry.clientMessageId,
     entry.recipientUserId,
     entry.recipientDeviceId,
+    entry.recipientRegistrationId ?? null,
     entry.type,
     entry.ciphertext,
     now(),
   );
+}
+
+/** Drops not-yet-accepted ciphertext for a peer (it was encrypted for a session now gone). */
+export async function deleteOutboxFor(recipientUserId) {
+  await getDatabase().runAsync('DELETE FROM outbox WHERE recipient_user_id = ?;', recipientUserId);
+}
+
+/** Outgoing messages held because the peer's security code changed (oldest first). */
+export async function listHeldForIdentity(peerUserId) {
+  const rows = await getDatabase().getAllAsync(
+    `SELECT client_message_id AS clientMessageId FROM messages
+      WHERE peer_user_id = ? AND direction = 'out' AND status = 'failed' AND error = ?
+      ORDER BY created_at ASC, id ASC;`,
+    peerUserId,
+    UNTRUSTED_IDENTITY,
+  );
+  return rows.map((r) => r.clientMessageId);
 }
 
 export async function deleteOutbox(clientMessageId) {

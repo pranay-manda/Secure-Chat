@@ -15,6 +15,7 @@ import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.UntrustedIdentityException
 import org.signal.libsignal.protocol.ecc.ECKeyPair
 import org.signal.libsignal.protocol.ecc.ECPublicKey
+import org.signal.libsignal.protocol.fingerprint.NumericFingerprintGenerator
 import org.signal.libsignal.protocol.kem.KEMKeyPair
 import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.kem.KEMPublicKey
@@ -88,13 +89,39 @@ class SignalProtocolModule : Module() {
       }
     }
 
-    /** Which local pre-keys an incoming PreKeySignalMessage needs (so JS can load them). */
+    /**
+     * Which local pre-keys an incoming PreKeySignalMessage needs (so JS can load them), and the
+     * sender identity key it claims (public; used to report an identity change, never trusted
+     * from here).
+     */
     AsyncFunction("preKeyMessageInfo") { body: String ->
       val message = PreKeySignalMessage(unb64(body))
       mapOf(
         "preKeyId" to message.preKeyId.orElse(null),
         "signedPreKeyId" to message.signedPreKeyId,
+        "identityKey" to b64(message.identityKey.serialize()),
+        "registrationId" to message.registrationId,
       )
+    }
+
+    /**
+     * Security code (Signal "safety number") for two identity public keys, computed by
+     * libsignal's NumericFingerprintGenerator. Both phones get the same 60 digits.
+     */
+    AsyncFunction("securityCode") {
+      iterations: Int, version: Int, localName: String, localIdentityKey: String,
+      remoteName: String, remoteIdentityKey: String ->
+      guard {
+        NumericFingerprintGenerator(iterations)
+          .createFor(
+            version,
+            localName.toByteArray(Charsets.UTF_8),
+            IdentityKey(unb64(localIdentityKey)),
+            remoteName.toByteArray(Charsets.UTF_8),
+            IdentityKey(unb64(remoteIdentityKey)),
+          )
+          .displayableFingerprint.displayText
+      }
     }
 
     /** Builds a new outgoing session from a peer's public pre-key bundle (PQXDH). */
@@ -184,10 +211,16 @@ class SignalProtocolModule : Module() {
       }
     }
 
-    fun result(): Map<String, Any?> = mapOf(
-      "session" to b64(store.loadSession(remoteAddress).serialize()),
-      "remoteIdentityKey" to store.getIdentity(remoteAddress)?.let { b64(it.serialize()) },
-    )
+    fun result(): Map<String, Any?> {
+      val session = store.loadSession(remoteAddress)
+      return mapOf(
+        "session" to b64(session.serialize()),
+        "remoteIdentityKey" to store.getIdentity(remoteAddress)?.let { b64(it.serialize()) },
+        // Which registration of the peer this session talks to (lets the server detect that
+        // the peer has since signed in again with new keys).
+        "remoteRegistrationId" to runCatching { session.remoteRegistrationId }.getOrNull(),
+      )
+    }
   }
 
   private inline fun <T> guard(block: () -> T): T =

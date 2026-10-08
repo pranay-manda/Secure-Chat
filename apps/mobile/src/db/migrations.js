@@ -138,4 +138,30 @@ export const MIGRATIONS = [
       ALTER TABLE conversations ADD COLUMN locked_at INTEGER;
     `,
   },
+  {
+    // Identity-key changes ("security code changed"). The trusted key stays in
+    // signal_identities until the user accepts the new one; until then the new key is only
+    // recorded here, and messages encrypted with it wait (as ciphertext) in message_envelopes
+    // with status 'identity_pending'. Local only: the server never learns trust decisions.
+    version: 5,
+    sql: `
+      CREATE TABLE IF NOT EXISTS identity_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        peer_user_id TEXT NOT NULL,
+        address TEXT NOT NULL,
+        previous_identity_key TEXT NOT NULL,
+        new_identity_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted')),
+        detected_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      -- At most one undecided change per peer.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_changes_pending
+        ON identity_changes (peer_user_id) WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_envelopes_sender ON message_envelopes (sender_user_id, status);
+
+      -- Registration id of the recipient keys the outbox ciphertext was encrypted for.
+      ALTER TABLE outbox ADD COLUMN recipient_registration_id INTEGER;
+    `,
+  },
 ];

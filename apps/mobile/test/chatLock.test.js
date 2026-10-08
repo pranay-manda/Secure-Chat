@@ -6,8 +6,9 @@ import { loadApp, mockApi, PHONE, resetDevice, signIn } from './helpers';
  * (mocked in setup.js); lock state lives in the encrypted local database only.
  */
 jest.mock('expo-router', () => ({
-  router: { push: jest.fn() },
+  router: { push: jest.fn(), back: jest.fn() },
   Stack: { Screen: () => null },
+  useLocalSearchParams: () => globalThis.__routeParams ?? {},
   // Rendered screens are always focused in these tests.
   useFocusEffect: (effect) => require('react').useEffect(() => effect(), [effect]),
 }));
@@ -245,6 +246,51 @@ describe('ChatLockGate (chat screen protection)', () => {
     await settle();
     expect(gateShown(tree)).toBe(true);
     expect(globalThis.__device.screenCapture.size).toBe(0);
+  });
+
+  it('a locked chat’s security code and "Security code changed" warning appear only after authentication', async () => {
+    // Bob's security code changed (new identity key recorded, not trusted).
+    const native = require('../modules/signal-protocol').getSignalNative();
+    const signalStore = require('../src/crypto/signalStore');
+    await signalStore.saveIdentity(await native.generateIdentity());
+    const oldKey = (await native.generateIdentity()).identityKey;
+    const newKey = (await native.generateIdentity()).identityKey;
+    const address = signalStore.addressOf(BOB);
+    await signalStore.savePeerIdentityIfNew(address, oldKey);
+    await signalStore.recordIdentityChange(BOB, address, oldKey, newKey);
+    await lock.lockConversation(BOB);
+    lock.relockChats();
+
+    nextAuth({ success: false, error: 'user_cancel' });
+    globalThis.__routeParams = { peerUserId: BOB };
+    const SecurityCodeScreen = require('../src/app/(app)/security-code/[peerUserId]').default;
+    let tree;
+    act(() => {
+      tree = create(React.createElement(SecurityCodeScreen));
+    });
+    await settle();
+
+    expect(gateShown(tree)).toBe(true);
+    const before = JSON.stringify(tree.toJSON());
+    expect(before).not.toMatch(/\d{5}|Security code|Bob|Accept/);
+
+    const button = tree.root.find((n) => n.props.accessibilityRole === 'button' && n.props.onPress);
+    await act(async () => {
+      button.props.onPress();
+    });
+    for (let i = 0; i < 10 && gateShown(tree); i += 1) await settle();
+    for (
+      let i = 0;
+      i < 20 && !tree.root.findAll((n) => n.props.testID === 'security-code').length;
+      i += 1
+    ) {
+      await settle();
+    }
+    const after = JSON.stringify(tree.toJSON());
+    expect(after).toMatch(/Security code changed/);
+    expect(after).toMatch(/Accept new security code/);
+    expect(after.match(/\d{5}/g).length).toBeGreaterThanOrEqual(12);
+    globalThis.__routeParams = undefined;
   });
 
   it('shows unlocked chats immediately with no prompt', async () => {

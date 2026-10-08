@@ -1,5 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -20,6 +20,7 @@ import { ChatLockGate } from '../../../components/ChatLockGate';
 import { ConnectionBanner } from '../../../components/ConnectionBanner';
 import { Avatar, IconButton } from '../../../components/design';
 import { peerLabel, useChat } from '../../../messaging/hooks';
+import { UNTRUSTED_IDENTITY } from '../../../messaging/messageStore';
 import {
   bumpRevision,
   markConversationRead,
@@ -64,17 +65,90 @@ function useKeyboardHeight() {
   return height;
 }
 
-/** Newest-first messages with a day separator after the last message of each day. */
-function withDaySeparators(messages) {
+/**
+ * Security-code notices for the timeline: when a change was detected and, once accepted, when
+ * the user accepted it.
+ */
+function identityNotices(events) {
+  const notices = [];
+  for (const event of events ?? []) {
+    notices.push({ kind: 'notice', key: `ic${event.id}`, at: event.detectedAt, type: 'changed' });
+    if (event.status === 'accepted' && event.resolvedAt) {
+      notices.push({
+        kind: 'notice',
+        key: `ia${event.id}`,
+        at: event.resolvedAt,
+        type: 'accepted',
+      });
+    }
+  }
+  return notices;
+}
+
+/** Newest-first messages and notices, with a day separator after the last item of each day. */
+function withDaySeparators(messages, notices = []) {
+  const items = [
+    ...messages.map((message) => ({
+      kind: 'message',
+      key: `m${message.id}`,
+      at: message.createdAt,
+      message,
+    })),
+    ...notices,
+  ]
+    // Newest first; at the same time a notice comes before (i.e. below, in this order) the
+    // message it is about.
+    .sort((a, b) => b.at - a.at || (a.kind === 'notice') - (b.kind === 'notice'));
   const rows = [];
-  messages.forEach((message, i) => {
-    rows.push({ kind: 'message', key: `m${message.id}`, message });
-    const older = messages[i + 1];
-    if (!older || formatDay(older.createdAt) !== formatDay(message.createdAt)) {
-      rows.push({ kind: 'day', key: `d${message.id}`, label: formatDay(message.createdAt) });
+  items.forEach((item, i) => {
+    rows.push(item);
+    const older = items[i + 1];
+    if (!older || formatDay(older.at) !== formatDay(item.at)) {
+      rows.push({ kind: 'day', key: `d${item.key}`, label: formatDay(item.at) });
     }
   });
   return rows;
+}
+
+function SecurityNotice({ notice, name }) {
+  return (
+    <View style={styles.securityNotice} testID={`security-notice-${notice.type}`}>
+      <Ionicons name="shield-checkmark-outline" size={14} color={colors.muted} />
+      <Text style={styles.securityNoticeText}>
+        {notice.type === 'accepted'
+          ? `You accepted ${name}'s new security code.`
+          : `${name}'s security code changed.`}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Shown while a contact's new security code is undecided. Only rendered inside ChatContent,
+ * i.e. after Chat Lock authentication for a locked chat.
+ */
+function SecurityCodeBanner({ peer, name }) {
+  return (
+    <View style={styles.banner} testID="security-code-banner">
+      <Ionicons name="shield-outline" size={22} color={colors.warning} />
+      <View style={styles.bannerText}>
+        <Text style={styles.bannerTitle}>Security code changed</Text>
+        <Text style={styles.bannerBody}>
+          {name}&apos;s security code changed. This usually happens when they reinstall Secure Chat
+          or sign in again. Their new messages are held, and yours won&apos;t be sent, until you
+          review and accept the new code.
+        </Text>
+      </View>
+      <Pressable
+        onPress={() => router.push(`/security-code/${peer}`)}
+        style={styles.bannerButton}
+        accessibilityRole="button"
+        testID="review-security-code"
+      >
+        <Text style={styles.bannerButtonText}>Review</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 function Bubble({ message, onRetry }) {
@@ -93,6 +167,10 @@ function Bubble({ message, onRetry }) {
     >
       {message.status === 'undecryptable' ? (
         <Text style={styles.undecryptable}>🔒 This message could not be decrypted.</Text>
+      ) : message.status === 'identity_pending' ? (
+        <Text style={styles.undecryptable}>
+          🔒 Waiting for you to accept this contact&apos;s new security code.
+        </Text>
       ) : (
         <Text style={styles.body} selectable>
           {message.body}
@@ -108,27 +186,42 @@ function Bubble({ message, onRetry }) {
         <Text style={styles.failed}>
           {message.error === 'TEMPORARY'
             ? 'Waiting for connection · tap to retry'
-            : 'Not sent · tap to retry'}
+            : message.error === UNTRUSTED_IDENTITY
+              ? 'Not sent · security code changed'
+              : 'Not sent · tap to retry'}
         </Text>
       ) : null}
     </Pressable>
   );
 }
 
-function Header({ peer, title }) {
+/** Chat header; tapping it opens the contact's security code. */
+function Header({ peer, title, identityChanged }) {
   return (
-    <View style={styles.header}>
+    <Pressable
+      style={styles.header}
+      onPress={() => router.push(`/security-code/${peer}`)}
+      accessibilityRole="button"
+      accessibilityHint="Shows the security code"
+      testID="chat-header"
+    >
       <Avatar id={peer} name={title} size={36} />
       <View style={styles.headerText}>
         <Text style={type.heading} numberOfLines={1}>
           {peerLabel(peer, title)}
         </Text>
         <View style={styles.encrypted}>
-          <Ionicons name="lock-closed" size={11} color={colors.muted} />
-          <Text style={type.caption}>End-to-end encrypted</Text>
+          <Ionicons
+            name={identityChanged ? 'shield-outline' : 'lock-closed'}
+            size={11}
+            color={identityChanged ? colors.warning : colors.muted}
+          />
+          <Text style={[type.caption, identityChanged && { color: colors.warning }]}>
+            {identityChanged ? 'Security code changed' : 'End-to-end encrypted'}
+          </Text>
         </View>
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -183,7 +276,12 @@ function ChatContent({ peer }) {
   const keyboardHeight = useKeyboardHeight();
   const insets = useSafeAreaInsets();
 
-  const rows = useMemo(() => withDaySeparators(data?.messages ?? []), [data]);
+  const rows = useMemo(
+    () => withDaySeparators(data?.messages ?? [], identityNotices(data?.identityEvents)),
+    [data],
+  );
+  const name = peerLabel(peer, data?.conversation?.title);
+  const identityChanged = Boolean(data?.identityChange);
 
   // Opening (or new messages arriving while open) marks incoming messages as read.
   useFocusEffect(
@@ -208,7 +306,13 @@ function ChatContent({ peer }) {
     >
       <Stack.Screen
         options={{
-          headerTitle: () => <Header peer={peer} title={data?.conversation?.title} />,
+          headerTitle: () => (
+            <Header
+              peer={peer}
+              title={data?.conversation?.title}
+              identityChanged={identityChanged}
+            />
+          ),
           headerRight: () => <LockAction peer={peer} locked={data?.conversation?.locked === 1} />,
         }}
       />
@@ -238,6 +342,8 @@ function ChatContent({ peer }) {
           renderItem={({ item }) =>
             item.kind === 'day' ? (
               <Text style={styles.day}>{item.label}</Text>
+            ) : item.kind === 'notice' ? (
+              <SecurityNotice notice={item} name={name} />
             ) : (
               <Bubble
                 message={item.message}
@@ -247,6 +353,8 @@ function ChatContent({ peer }) {
           }
         />
       )}
+
+      {identityChanged ? <SecurityCodeBanner peer={peer} name={name} /> : null}
 
       <View style={styles.composer}>
         <View style={styles.inputBox}>
@@ -345,6 +453,39 @@ const styles = StyleSheet.create({
   },
   time: { fontSize: 11, color: colors.muted },
   failed: { fontSize: 11, color: colors.danger, marginTop: 2, alignSelf: 'flex-end' },
+  securityNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    alignSelf: 'center',
+    maxWidth: '90%',
+    backgroundColor: colors.notice,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    marginVertical: spacing.xs,
+  },
+  securityNoticeText: { ...type.caption, color: colors.text, flexShrink: 1 },
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginHorizontal: spacing.sm,
+    marginTop: spacing.sm,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.notice,
+  },
+  bannerText: { flex: 1, gap: 2 },
+  bannerTitle: { ...type.heading, fontSize: 15 },
+  bannerBody: { ...type.caption, color: colors.text, lineHeight: 17 },
+  bannerButton: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primary,
+  },
+  bannerButtonText: { color: colors.onPrimary, fontWeight: '600' },
   composer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
