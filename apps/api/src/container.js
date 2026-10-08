@@ -1,4 +1,5 @@
 import { createAuthenticate } from './middleware/authenticate.js';
+import { createAccountService } from './modules/account/accountService.js';
 import { createRateLimiters } from './middleware/rateLimit.js';
 import { createAuthService } from './modules/auth/authService.js';
 import { createOtpDelivery } from './modules/auth/otpDelivery.js';
@@ -61,6 +62,7 @@ export function createContainer({
     keyService,
     authService: createAuthService({ otpService, tokenService, keyService, logger }),
     deviceService: createDeviceService({ logger }),
+    accountService: createAccountService({ logger }),
     contactService: createContactService(),
     pushNotifier,
     messageService: createMessageService({

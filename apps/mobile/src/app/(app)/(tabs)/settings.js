@@ -122,6 +122,14 @@ export default function SettingsScreen() {
           disabled={loggingOut}
           onPress={confirmLogout}
         />
+        <ListRow
+          icon="trash-outline"
+          title="Delete account"
+          subtitle="Permanently delete your account and data"
+          danger
+          disabled={loggingOut}
+          onPress={() => router.push('/delete-account')}
+        />
       </View>
     </ScrollView>
   );

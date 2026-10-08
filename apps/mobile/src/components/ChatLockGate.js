@@ -38,8 +38,11 @@ export function ChatLockGate({ peerUserId, children }) {
 
   const showing = locked === false || (locked === true && unlocked);
 
-  // While a locked chat is visible, block screenshots/recording and blank the app-switcher
-  // thumbnail (Android FLAG_SECURE), so its content is not captured when leaving the app.
+  // While a locked chat is visible, block capturing it where the platform allows. Android
+  // (FLAG_SECURE): blocks screenshots and recording and blanks the app-switcher thumbnail.
+  // iOS: blocks screen recording/mirroring only — iOS has no API to prevent screenshots, and
+  // the app-switcher snapshot is not blanked. That is an OS limitation, not a data leak to
+  // other apps; the unlock session still ends when the app goes to the background.
   const protect = locked === true && unlocked;
   useEffect(() => {
     if (!protect) return undefined;

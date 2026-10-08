@@ -89,6 +89,19 @@ export const useAuthStore = create((set, get) => ({
     set({ status: AUTH_STATUS.SIGNED_OUT, user: null, notice: null });
   },
 
+  /**
+   * Permanently deletes the account on the server, then wipes everything on this phone: the
+   * encrypted database and its key, tokens, the Signal identity, push registration, and the
+   * device id (a fresh one is used for any future account). Local data is wiped only after the
+   * server confirmed the deletion: if the request fails (offline, server error) it throws and
+   * nothing is lost, so the user can try again.
+   */
+  async deleteAccount() {
+    await apiRequest('DELETE', '/account');
+    await wipeLocalSession({ newDeviceId: true });
+    set({ status: AUTH_STATUS.SIGNED_OUT, user: null, notice: 'Your account was deleted.' });
+  },
+
   /** Called by the API client when the server ends the session (revoked, reused, expired). */
   async handleSessionEnded(code) {
     if (get().status === AUTH_STATUS.SIGNED_OUT) return;

@@ -1,6 +1,9 @@
 {
-  "platforms": ["android"],
+  "platforms": ["android", "apple"],
   "android": {
     "modules": ["expo.modules.signalprotocol.SignalProtocolModule"]
+  },
+  "apple": {
+    "modules": ["SignalProtocolModule"]
   }
 }

@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { devInvalidateAccessToken, getCachedSession } from '../../auth/tokenStore';
-import { E2EEDevCard } from '../../components/E2EEDevCard';
 import { ListRow, SectionHeader } from '../../components/design';
 import { Card, TextButton } from '../../components/ui';
 import { getCipherVersion } from '../../db/database';
@@ -11,22 +10,17 @@ import { getDeviceId } from '../../lib/deviceId';
 import { useMessagingStore } from '../../messaging/messagingEngine';
 import { colors, spacing, type } from '../../theme';
 
-/** How this device protects messages, plus session diagnostics (developer tools in dev). */
+// Developer tools are only loaded in development builds: in a release build `__DEV__` is false
+// at bundle time, so this require (and the card's code) is not part of the app at all.
+const E2EEDevCard = __DEV__ ? require('../../components/E2EEDevCard').E2EEDevCard : null;
+
+/** How this device protects messages. Session diagnostics and developer tools: dev builds only. */
 export default function SecurityScreen() {
-  const realtime = useMessagingStore((state) => state.realtime);
   const [deviceId, setDeviceId] = useState('');
-  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     getDeviceId().then(setDeviceId);
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
   }, []);
-
-  const session = getCachedSession();
-  const accessSecondsLeft = session
-    ? Math.max(0, Math.round((session.accessTokenExpiresAt - now) / 1000))
-    : 0;
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -48,6 +42,30 @@ export default function SecurityScreen() {
         title="Device ID"
         value={deviceId ? `${deviceId.slice(0, 8)}…` : '…'}
       />
+
+      {__DEV__ ? <DeveloperDiagnostics /> : null}
+    </ScrollView>
+  );
+}
+
+/** Token lifetime, refresh count, realtime state and test actions (development builds only). */
+function DeveloperDiagnostics() {
+  const realtime = useMessagingStore((state) => state.realtime);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const session = getCachedSession();
+  const accessSecondsLeft = session
+    ? Math.max(0, Math.round((session.accessTokenExpiresAt - now) / 1000))
+    : 0;
+
+  return (
+    <View testID="developer-diagnostics">
+      <SectionHeader>Developer</SectionHeader>
       <ListRow
         icon="time-outline"
         title="Access token expires in"
@@ -59,20 +77,17 @@ export default function SecurityScreen() {
         value={String(getApiStats().refreshes)}
       />
       <ListRow icon="flash-outline" title="Live updates" value={realtime} />
-
-      {__DEV__ ? (
-        <View style={styles.dev}>
-          <Card title="Developer">
-            <Text style={type.secondary}>
-              Replaces the access token with an invalid one; the next request gets a 401 and must
-              refresh automatically.
-            </Text>
-            <TextButton title="Invalidate access token" onPress={devInvalidateAccessToken} />
-          </Card>
-          <E2EEDevCard />
-        </View>
-      ) : null}
-    </ScrollView>
+      <View style={styles.dev}>
+        <Card title="Developer">
+          <Text style={type.secondary}>
+            Replaces the access token with an invalid one; the next request gets a 401 and must
+            refresh automatically.
+          </Text>
+          <TextButton title="Invalidate access token" onPress={devInvalidateAccessToken} />
+        </Card>
+        {E2EEDevCard ? <E2EEDevCard /> : null}
+      </View>
+    </View>
   );
 }
 

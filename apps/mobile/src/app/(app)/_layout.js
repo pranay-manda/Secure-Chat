@@ -69,6 +69,7 @@ export default function SignedInLayout() {
       <Stack.Screen name="security" options={{ title: 'Security' }} />
       <Stack.Screen name="locked-chats" options={{ title: 'Locked chats' }} />
       <Stack.Screen name="chat-lock" options={{ title: 'Chat Lock' }} />
+      <Stack.Screen name="delete-account" options={{ title: 'Delete account' }} />
     </Stack>
   );
 }

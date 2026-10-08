@@ -14,7 +14,12 @@
     "android": {
       "package": "com.securechat.app",
       "googleServicesFile": "./google-services.json",
-      "blockedPermissions": ["android.permission.WRITE_CONTACTS"],
+      "blockedPermissions": [
+        "android.permission.WRITE_CONTACTS",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
       "allowBackup": false,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -54,6 +59,7 @@
       ],
       "./plugins/withSqlcipherOpenssl",
       "./plugins/withLibsignalAndroid",
+      "./plugins/withLibsignalIos",
       [
         "expo-splash-screen",
         {

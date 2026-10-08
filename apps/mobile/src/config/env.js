@@ -7,11 +7,28 @@ import { z } from 'zod';
  * Expo only inlines `process.env.EXPO_PUBLIC_*` when accessed with dot notation,
  * so each variable is read explicitly here.
  */
+/** Hosts that only ever mean "this machine": never valid for a preview/production build. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1']);
+
+/**
+ * Release (preview/production) builds must talk to a real HTTPS server. Development builds may
+ * use http:// and localhost (adb reverse, emulator, LAN IP).
+ */
+export function isAllowedApiUrl(value, { dev = __DEV__ } = {}) {
+  if (dev) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 const schema = z.object({
   apiUrl: z
     .url()
-    .refine((value) => __DEV__ || value.startsWith('https://'), {
-      message: 'must use https:// outside development builds',
+    .refine((value) => isAllowedApiUrl(value), {
+      message: 'must be an https:// server (not localhost) outside development builds',
     })
     .transform((value) => value.replace(/\/+$/, '')),
 });

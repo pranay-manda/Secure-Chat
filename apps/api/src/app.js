@@ -8,6 +8,7 @@ import { HEADERS, LIMITS } from '@secure-chat/shared/constants';
 
 import { serializeError } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
+import { createAccountRouter } from './modules/account/account.routes.js';
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import { createContactsRouter } from './modules/contacts/contacts.routes.js';
 import { createDevicesRouter } from './modules/devices/devices.routes.js';
@@ -88,6 +89,7 @@ export function createApp({ config, logger, healthChecks, container }) {
     }),
   );
   app.use('/auth', createAuthRouter(container));
+  app.use('/account', createAccountRouter(container));
   app.use('/devices', createDevicesRouter(container));
   app.use('/keys', createKeysRouter(container));
   app.use('/messages', createMessagesRouter(container));
