@@ -1,0 +1,8 @@
+{
+  "watch": ["src", "../../packages/shared/src", ".env"],
+  "ext": "js,mjs,json",
+  "ignore": ["test/**", "node_modules/**"],
+  "exec": "node --env-file-if-exists=.env src/server.js",
+  "delay": 300,
+  "signal": "SIGTERM"
+}

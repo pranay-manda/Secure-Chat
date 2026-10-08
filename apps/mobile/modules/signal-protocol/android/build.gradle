@@ -1,0 +1,27 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.signalprotocol'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.signalprotocol"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+repositories {
+  // Signal publishes current libsignal-android releases to its own Maven repository.
+  maven { url 'https://build-artifacts.signal.org/libraries/maven/' }
+  mavenCentral()
+}
+
+dependencies {
+  // Official, audited Signal Protocol implementation (Rust core + JNI). Keep in lockstep with
+  // @signalapp/libsignal-client used by the API's integration tests.
+  implementation 'org.signal:libsignal-android:0.105.0'
+}

@@ -1,0 +1,39 @@
+{
+  "name": "secure-chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Secure messaging app monorepo (Expo mobile, Express API, shared package)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.9.0"
+  },
+  "scripts": {
+    "api:dev": "npm run dev -w @secure-chat/api",
+    "api:start": "npm run start -w @secure-chat/api",
+    "mobile:start": "npm run start -w @secure-chat/mobile",
+    "lint": "eslint . && npm run lint -w @secure-chat/mobile",
+    "lint:fix": "eslint . --fix && npm run lint -w @secure-chat/mobile -- --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run test --workspaces --if-present",
+    "check": "npm run lint && npm run format:check && npm run test"
+  },
+  "overrides": {
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native-worklets": "0.10.1",
+    "react-native-reanimated": "4.5.1",
+    "react-native-gesture-handler": "~2.32.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.9",
+    "vitest": "^5.0.3"
+  }
+}
