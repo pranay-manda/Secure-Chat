@@ -24,6 +24,7 @@ const SENSITIVE_KEYS = [
   'plaintext',
   'body',
   'phoneNumber',
+  'phoneNumbers',
   'email',
   'resendApiKey',
   'pushToken',

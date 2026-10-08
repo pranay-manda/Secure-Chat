@@ -14,6 +14,11 @@ export const RATE_LIMITS = Object.freeze({
   /** Bundle fetches consume one-time pre-keys: limit draining another user's pool. */
   bundleFetchPerUser: { points: 30, duration: 60 },
   messageSendPerUser: { points: 60, duration: 60 },
+  /**
+   * Contact discovery is counted in phone numbers checked, not requests, so nobody can
+   * enumerate the phone-number space by spreading probes over many small requests.
+   */
+  contactMatchNumbersPerUser: { points: 5000, duration: 60 * 60 },
 });
 
 /**
@@ -35,10 +40,10 @@ export function createRateLimiters({ redis, inMemory = false }) {
     ]),
   );
 
-  /** Consumes one point or throws 429 (limit hit) / 503 (limiter store unavailable). */
-  async function consume(name, key) {
+  /** Consumes `points` (default 1) or throws 429 (limit hit) / 503 (limiter store unavailable). */
+  async function consume(name, key, points = 1) {
     try {
-      await limiters[name].consume(key);
+      await limiters[name].consume(key, points);
     } catch (result) {
       if (result instanceof RateLimiterRes) {
         throw new HttpError(429, ERROR_CODE.RATE_LIMITED, 'Too many requests, try again later', {

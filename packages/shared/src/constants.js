@@ -29,6 +29,8 @@ export const LIMITS = Object.freeze({
   PUSHER_INLINE_PAYLOAD_BYTES: 8 * 1024,
   /** Max message ids in one read-receipt or status request. */
   MESSAGE_BATCH_MAX: 100,
+  /** Max phone numbers in one contact-discovery request (clients send larger books in batches). */
+  CONTACT_MATCH_BATCH_MAX: 500,
   /** Max items returned by one page of a cursor-paginated endpoint. */
   PAGE_SIZE_MAX: 100,
   PAGE_SIZE_DEFAULT: 50,

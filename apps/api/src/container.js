@@ -5,6 +5,7 @@ import { createOtpDelivery } from './modules/auth/otpDelivery.js';
 import { createOtpService } from './modules/auth/otpService.js';
 import { createPushNotifier } from './modules/messages/pushNotifier.js';
 import { createTokenService } from './modules/auth/tokenService.js';
+import { createContactService } from './modules/contacts/contactService.js';
 import { createDeviceService } from './modules/devices/deviceService.js';
 import { createKeyService } from './modules/keys/keyService.js';
 import { createMessageService } from './modules/messages/messageService.js';
@@ -60,6 +61,7 @@ export function createContainer({
     keyService,
     authService: createAuthService({ otpService, tokenService, keyService, logger }),
     deviceService: createDeviceService({ logger }),
+    contactService: createContactService(),
     pushNotifier,
     messageService: createMessageService({
       realtime: realtime ?? createRealtime(config.pusher),

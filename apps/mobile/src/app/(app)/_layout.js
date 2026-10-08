@@ -48,6 +48,7 @@ export default function SignedInLayout() {
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="chat/[peerUserId]" options={{ title: '' }} />
       <Stack.Screen name="new-chat" options={{ title: 'New chat' }} />
+      <Stack.Screen name="new-chat-id" options={{ title: 'Secure Chat ID' }} />
       <Stack.Screen name="devices" options={{ title: 'Devices' }} />
       <Stack.Screen name="security" options={{ title: 'Security' }} />
       <Stack.Screen name="locked-chats" options={{ title: 'Locked chats' }} />

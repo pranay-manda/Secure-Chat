@@ -283,6 +283,47 @@ jest.mock('expo-local-authentication', () => {
   };
 });
 
+/**
+ * expo-contacts test double (new Contact API). Per-device `globalThis.__device.contacts`:
+ * `status` (undetermined | granted | denied), `grantOnRequest`, `book` (array of
+ * { fullName, phones: [{ number }] }), and counters for permission prompts and reads.
+ */
+jest.mock('expo-contacts', () => {
+  const state = () =>
+    (globalThis.__device.contacts ??= {
+      status: 'undetermined',
+      canAskAgain: true,
+      grantOnRequest: true,
+      book: [],
+      requests: 0,
+      reads: [],
+    });
+  return {
+    ContactField: { FULL_NAME: 'fullName', PHONES: 'phones' },
+    getPermissionsAsync: jest.fn(async () => ({
+      status: state().status,
+      canAskAgain: state().canAskAgain,
+    })),
+    requestPermissionsAsync: jest.fn(async () => {
+      const s = state();
+      s.requests += 1;
+      if (s.status === 'undetermined') {
+        s.status = s.grantOnRequest ? 'granted' : 'denied';
+        s.canAskAgain = s.grantOnRequest;
+      }
+      return { status: s.status, canAskAgain: s.canAskAgain };
+    }),
+    Contact: {
+      getAllDetails: jest.fn(async (fields, { limit, offset }) => {
+        const s = state();
+        if (s.status !== 'granted') throw new Error('Missing contacts permission');
+        s.reads.push({ fields, limit, offset });
+        return s.book.slice(offset, offset + limit);
+      }),
+    },
+  };
+});
+
 /** expo-screen-capture test double: tracks which keys currently prevent capture. */
 jest.mock('expo-screen-capture', () => {
   const active = () => (globalThis.__device.screenCapture ??= new Set());
