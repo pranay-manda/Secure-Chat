@@ -20,6 +20,7 @@ beforeEach(async () => {
   jest.resetModules();
   resetDevice();
   globalThis.__device.notify = undefined;
+  globalThis.__device.tapListeners = undefined;
   app = loadApp();
   push = require('../src/notifications/pushNotifications');
   await signIn(app);
@@ -146,35 +147,116 @@ describe('notifications while the app is open', () => {
 });
 
 describe('tapping a notification', () => {
-  const response = (identifier, data) => ({
-    notification: { request: { identifier, content: { title: 'Secure Chat', data } } },
+  const PEER = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+  const response = (identifier, messageId, type = 'new_message') => ({
+    actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+    notification: {
+      request: {
+        identifier,
+        content: {
+          title: 'Secure Chat',
+          body: 'New message',
+          data: { type, messageId, hasMessage: true },
+        },
+      },
+    },
+  });
+  const tap = (res) => {
+    for (const listener of globalThis.__device.tapListeners ?? []) listener(res);
+  };
+  const routing = () => require('../src/notifications/notificationRouting');
+  /** The app was closed and launched by tapping `res` (held by the native module). */
+  const launchedBy = (res) => {
+    globalThis.__device.notify ??= { tokenListeners: new Set(), requested: 0, unregistered: 0 };
+    globalThis.__device.notify.lastResponse = res;
+  };
+
+  /** The existing encrypted sync, simulated: the envelope is fetched, decrypted and stored. */
+  function syncDelivers(serverMessageId) {
+    const engine = require('../src/messaging/messagingEngine');
+    const signalStore = require('../src/crypto/signalStore');
+    return jest.spyOn(engine, 'requestSync').mockImplementation(async () => {
+      await signalStore.insertMessage({
+        serverMessageId,
+        peerUserId: PEER,
+        direction: 'in',
+        body: 'decrypted locally',
+        status: 'received',
+      });
+    });
+  }
+
+  it('cold start: the tap that launched the app opens its conversation once ready', async () => {
+    const { router } = require('expo-router');
+    const notifications = require('expo-notifications');
+    launchedBy(response('n-cold', 'srv-cold'));
+    const sync = syncDelivers('srv-cold');
+
+    routing().startNotificationCapture(); // root layout, before sign-in/navigation
+    expect(routing().hasPendingTaps()).toBe(true);
+    expect(router.push).not.toHaveBeenCalled(); // nothing happens until everything is ready
+
+    await routing().processPendingTaps(); // signed in, messaging started, navigator mounted
+
+    // Sync (fetch + local decrypt) runs before the conversation is looked up.
+    expect(sync).toHaveBeenCalledTimes(1);
+    expect(router.push.mock.calls).toEqual([[`/chat/${PEER}`]]);
+    expect(notifications.clearLastNotificationResponse).toHaveBeenCalled();
+    expect(notify().lastResponse).toBeNull();
   });
 
-  it('opens the conversation of the (locally decrypted) message, once', async () => {
+  it('background/running: a tap delivered by the listener opens its conversation', async () => {
     const { router } = require('expo-router');
-    const { openFromNotification } = require('../src/notifications/useNotifications');
-    await require('../src/crypto/signalStore').insertMessage({
-      serverMessageId: 'srv-message-1',
-      peerUserId: 'bbbbbbbbbbbbbbbbbbbbbbbb',
-      direction: 'in',
-      body: 'hi',
-      status: 'received',
+    syncDelivers('srv-warm');
+    routing().startNotificationCapture();
+    const queued = jest.fn();
+    routing().onTapQueued(queued);
+
+    tap(response('n-warm', 'srv-warm'));
+    expect(queued).toHaveBeenCalledTimes(1); // the signed-in layout processes on this signal
+    await routing().processPendingTaps();
+
+    expect(router.push.mock.calls).toEqual([[`/chat/${PEER}`]]);
+  });
+
+  it('handles each notification once (launch response + listener, re-mounts, repeats)', async () => {
+    const { router } = require('expo-router');
+    syncDelivers('srv-dup');
+    launchedBy(response('n-dup', 'srv-dup'));
+
+    routing().startNotificationCapture();
+    routing().startNotificationCapture(); // second mount: no second capture/listener
+    tap(response('n-dup', 'srv-dup')); // same tap also reported by the listener
+    await Promise.all([routing().processPendingTaps(), routing().processPendingTaps()]);
+    tap(response('n-dup', 'srv-dup')); // reported again later
+    await routing().processPendingTaps();
+
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(globalThis.__device.tapListeners.size).toBe(1);
+  });
+
+  it('falls back to the chat list for unknown messages and ignores other notification types', async () => {
+    const { router } = require('expo-router');
+    jest.spyOn(require('../src/messaging/messagingEngine'), 'requestSync').mockResolvedValue();
+    routing().startNotificationCapture();
+
+    tap(response('n-unknown', 'srv-not-synced'));
+    tap(response('n-other', 'x', 'something_else'));
+    await routing().processPendingTaps();
+
+    expect(router.push.mock.calls).toEqual([['/']]);
+  });
+
+  it('a notification never carries message content', () => {
+    const { messageIdFromNotification } = push;
+    const res = response('n-1', 'srv-1');
+    expect(res.notification.request.content).toEqual({
+      title: 'Secure Chat',
+      body: 'New message',
+      data: { type: 'new_message', messageId: 'srv-1', hasMessage: true },
     });
-
-    const tap = response('n-1', {
-      type: 'new_message',
-      messageId: 'srv-message-1',
-      hasMessage: true,
-    });
-    expect(await openFromNotification(tap)).toBe('bbbbbbbbbbbbbbbbbbbbbbbb');
-    expect(await openFromNotification(tap)).toBeNull(); // same tap reported again: ignored
-    expect(router.push.mock.calls).toEqual([['/chat/bbbbbbbbbbbbbbbbbbbbbbbb']]);
-
-    await openFromNotification(response('n-2', { type: 'new_message', messageId: 'unknown' }));
-    expect(router.push).toHaveBeenLastCalledWith('/');
-
-    await openFromNotification(response('n-3', { type: 'something_else' }));
-    expect(router.push).toHaveBeenCalledTimes(2);
+    expect(messageIdFromNotification(res.notification)).toBe('srv-1');
+    expect(messageIdFromNotification({ request: { content: { data: { type: 'x' } } } })).toBeNull();
   });
 });
 

@@ -1,4 +1,4 @@
-import { Stack } from 'expo-router';
+import { Stack, useRootNavigationState } from 'expo-router';
 import { useEffect, useState } from 'react';
 
 import { useAuthStore } from '../../auth/authStore';
@@ -27,8 +27,10 @@ export default function SignedInLayout() {
     };
   }, [setup.state, userId]);
 
-  // Push registration and notification taps (open the right conversation).
-  useNotifications(messagingReady);
+  // Push registration and notification taps (open the right conversation). Routing waits for
+  // the root navigator to be mounted (its state has a key) so a cold-start tap is not dropped.
+  const navigationReady = Boolean(useRootNavigationState()?.key);
+  useNotifications(messagingReady, navigationReady);
 
   return (
     <Stack

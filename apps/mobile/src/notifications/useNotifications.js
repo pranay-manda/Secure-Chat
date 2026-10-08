@@ -1,44 +1,20 @@
 import * as Notifications from 'expo-notifications';
-import { router } from 'expo-router';
 import { useEffect } from 'react';
 
-import { findPeerByServerMessageId } from '../messaging/messageStore';
 import { requestSync } from '../messaging/messagingEngine';
-import {
-  messageIdFromNotification,
-  registerForPushNotifications,
-  watchPushTokenChanges,
-} from './pushNotifications';
-
-/** Taps already handled in this JS session (cold-start responses are reported again). */
-const handledTaps = new Set();
+import { onTapQueued, processPendingTaps } from './notificationRouting';
+import { registerForPushNotifications, watchPushTokenChanges } from './pushNotifications';
 
 /**
- * Opens the conversation a tapped notification belongs to. The notification only holds an
- * opaque message id: sync first (fetch + decrypt the envelope locally), then look up which
- * conversation that message is in. Falls back to the chat list.
+ * Push notification wiring for the signed-in app.
+ *
+ * @param {boolean} messagingReady messaging started (keys registered), so the token registration
+ *   is authenticated and a tapped message can be synced and decrypted
+ * @param {boolean} navigationReady the root navigator is mounted, so routing will not be dropped
  */
-export async function openFromNotification(response) {
-  const id = response?.notification?.request?.identifier;
-  const messageId = messageIdFromNotification(response?.notification);
-  if (!messageId || (id && handledTaps.has(id))) return null;
-  if (id) handledTaps.add(id);
-
-  await requestSync().catch(() => {});
-  const peer = await findPeerByServerMessageId(messageId).catch(() => null);
-  router.push(peer ? `/chat/${peer}` : '/');
-  return peer;
-}
-
-/**
- * Push notification wiring for the signed-in app. `ready` = messaging started (keys
- * registered), so a tap can be resolved and the token registration is authenticated.
- */
-export function useNotifications(ready) {
-  const lastResponse = Notifications.useLastNotificationResponse();
-
+export function useNotifications(messagingReady, navigationReady) {
   useEffect(() => {
-    if (!ready) return undefined;
+    if (!messagingReady) return undefined;
     registerForPushNotifications();
     const stopWatching = watchPushTokenChanges();
     // A push received while open: Pusher normally got there first; sync just in case.
@@ -47,10 +23,13 @@ export function useNotifications(ready) {
       stopWatching();
       received.remove();
     };
-  }, [ready]);
+  }, [messagingReady]);
 
-  // Taps, including the one that launched the app from a killed state.
+  // Taps (cold start and warm) are queued by notificationRouting from app launch; open them
+  // once everything they need is ready, and again whenever a new tap is queued.
   useEffect(() => {
-    if (ready && lastResponse) openFromNotification(lastResponse);
-  }, [ready, lastResponse]);
+    if (!messagingReady || !navigationReady) return undefined;
+    processPendingTaps();
+    return onTapQueued(() => processPendingTaps());
+  }, [messagingReady, navigationReady]);
 }

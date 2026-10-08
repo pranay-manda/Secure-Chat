@@ -245,7 +245,17 @@ jest.mock('expo-notifications', () => {
       return { remove: () => state().tokenListeners.delete(listener) };
     }),
     addNotificationReceivedListener: jest.fn(() => ({ remove() {} })),
-    useLastNotificationResponse: jest.fn(() => null),
+    // Tap that launched the app (cold start), kept until cleared, like the native module.
+    getLastNotificationResponse: jest.fn(() => globalThis.__device.notify?.lastResponse ?? null),
+    clearLastNotificationResponse: jest.fn(() => {
+      if (globalThis.__device.notify) globalThis.__device.notify.lastResponse = null;
+    }),
+    // Taps while running/backgrounded: tests call globalThis.__device.tapListeners.
+    addNotificationResponseReceivedListener: jest.fn((listener) => {
+      const listeners = (globalThis.__device.tapListeners ??= new Set());
+      listeners.add(listener);
+      return { remove: () => listeners.delete(listener) };
+    }),
     dismissAllNotificationsAsync: jest.fn(async () => {}),
     unregisterForNotificationsAsync: jest.fn(async () => {
       state().unregistered += 1;

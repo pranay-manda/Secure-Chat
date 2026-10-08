@@ -4,10 +4,15 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 
 import { AUTH_STATUS, useAuthStore } from '../auth/authStore';
+import { startNotificationCapture } from '../notifications/notificationRouting';
 
 // Keep the splash screen up until the stored session has been checked, so a signed-in user
 // never sees the login screen flash on start.
 SplashScreen.preventAutoHideAsync().catch(() => {});
+
+// Capture the notification tap that launched the app (and later taps) before anything else
+// mounts; it is opened once the user is signed in and navigation is ready.
+startNotificationCapture();
 
 export default function RootLayout() {
   const status = useAuthStore((state) => state.status);
