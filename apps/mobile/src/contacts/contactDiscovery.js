@@ -4,6 +4,7 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js/min';
 
 import { apiRequest } from '../lib/api';
 import { toE164 } from '../lib/phone';
+import { applyContactNames, listUntitledConversationIds } from '../messaging/messageStore';
 
 /**
  * Contact discovery: which people in this phone's address book use Secure Chat?
@@ -92,5 +93,42 @@ export async function discoverContacts({ myPhoneNumber = null } = {}) {
       maskedPhone,
     });
   }
-  return people.sort((a, b) => a.name.localeCompare(b.name));
+  people.sort((a, b) => a.name.localeCompare(b.name));
+  // Chats that started with an incoming message have no name yet: use the contact name.
+  await applyContactNames(people.filter((p) => p.name !== p.maskedPhone)).catch(() => {});
+  return people;
+}
+
+/** Peers already looked up in this app session (avoids repeated address-book matching). */
+const attempted = new Set();
+let lastRun = 0;
+let running = null;
+const MIN_INTERVAL_MS = 2 * 60 * 1000;
+
+/**
+ * Names unnamed conversations (e.g. someone in your contacts messaged you first) from the
+ * address book. Runs only if Contacts permission was ALREADY granted (never prompts), only
+ * when there is an unnamed chat not yet looked up, and at most every 2 minutes, so it does not
+ * re-upload the address book needlessly or eat into the discovery rate limit.
+ *
+ * @returns {Promise<number>} conversations named
+ */
+export function nameConversationsFromContacts({ myPhoneNumber = null } = {}) {
+  running ??= (async () => {
+    const pending = (await listUntitledConversationIds()).filter((id) => !attempted.has(id));
+    if (pending.length === 0 || Date.now() - lastRun < MIN_INTERVAL_MS) return 0;
+    const { status } = await Contacts.getPermissionsAsync();
+    if (status !== 'granted') return 0;
+
+    lastRun = Date.now();
+    pending.forEach((id) => attempted.add(id));
+    const people = await discoverContacts({ myPhoneNumber });
+    const untitled = new Set(pending);
+    return people.filter((p) => untitled.has(p.userId) && p.name !== p.maskedPhone).length;
+  })()
+    .catch(() => 0)
+    .finally(() => {
+      running = null;
+    });
+  return running;
 }

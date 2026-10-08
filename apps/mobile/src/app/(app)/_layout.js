@@ -3,7 +3,13 @@ import { useEffect, useState } from 'react';
 
 import { useAuthStore } from '../../auth/authStore';
 import { useSignalSetup } from '../../crypto/useSignalSetup';
-import { startMessaging, stopMessaging } from '../../messaging/messagingEngine';
+import { nameConversationsFromContacts } from '../../contacts/contactDiscovery';
+import {
+  bumpRevision,
+  startMessaging,
+  stopMessaging,
+  useMessagingStore,
+} from '../../messaging/messagingEngine';
 import { useNotifications } from '../../notifications/useNotifications';
 import { relockChats } from '../../security/chatLock';
 import { colors } from '../../theme';
@@ -30,6 +36,15 @@ export default function SignedInLayout() {
 
   // Leaving the signed-in app (logout, session end) always ends a Chat Lock unlock session.
   useEffect(() => relockChats, []);
+
+  // A chat started by someone else has no name: name it from the address book (only if
+  // Contacts permission was already granted; never prompts, local only).
+  const revision = useMessagingStore((state) => state.revision);
+  const myPhoneNumber = useAuthStore((state) => state.user?.phoneNumber ?? null);
+  useEffect(() => {
+    if (!messagingReady) return;
+    nameConversationsFromContacts({ myPhoneNumber }).then((named) => named > 0 && bumpRevision());
+  }, [messagingReady, revision, myPhoneNumber]);
 
   // Push registration and notification taps (open the right conversation). Routing waits for
   // the root navigator to be mounted (its state has a key) so a cold-start tap is not dropped.

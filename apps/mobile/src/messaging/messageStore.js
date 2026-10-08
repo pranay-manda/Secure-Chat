@@ -70,6 +70,36 @@ export async function listConversations({ locked = false } = {}) {
   );
 }
 
+/** Conversations that have no name yet (e.g. created by an incoming message). */
+export async function listUntitledConversationIds() {
+  const rows = await getDatabase().getAllAsync(
+    'SELECT peer_user_id AS peerUserId FROM conversations WHERE title IS NULL;',
+  );
+  return rows.map((r) => r.peerUserId);
+}
+
+/**
+ * Names conversations from the address book. Only fills chats that have no name yet: a name
+ * the user chose (or an earlier contact name) is never overwritten. Local only.
+ *
+ * @param {Array<{ userId: string, name: string }>} people
+ * @returns {Promise<number>} conversations named
+ */
+export async function applyContactNames(people) {
+  const db = getDatabase();
+  let named = 0;
+  for (const { userId, name } of people) {
+    if (!name) continue;
+    const result = await db.runAsync(
+      'UPDATE conversations SET title = ? WHERE peer_user_id = ? AND title IS NULL;',
+      name,
+      userId,
+    );
+    named += result.changes;
+  }
+  return named;
+}
+
 // --- Chat Lock (local access control; see src/security/chatLock.js) ---
 
 export async function isConversationLocked(peerUserId) {

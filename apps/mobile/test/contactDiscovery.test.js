@@ -208,6 +208,58 @@ describe('matching', () => {
   });
 });
 
+describe('naming chats that someone else started', () => {
+  const store = () => require('../src/messaging/messageStore');
+
+  it('names an incoming chat from the address book, once, without overwriting nicknames', async () => {
+    // Bob messaged first: the chat exists but has no name. Carol's chat has my own nickname.
+    await store().ensureConversation(BOB_ID);
+    await store().ensureConversation(CAROL_ID, { title: 'My nickname for Carol' });
+    setPhoneBook([
+      { fullName: 'Bob Kumar', phones: [{ number: '+919812345678' }] },
+      { fullName: 'Carol Contact', phones: [{ number: '+14155550123' }] },
+    ]);
+    const calls = registered({
+      '+919812345678': { id: BOB_ID },
+      '+14155550123': { id: CAROL_ID },
+    });
+
+    expect(await discovery.nameConversationsFromContacts()).toBe(1);
+
+    expect((await store().getConversation(BOB_ID)).title).toBe('Bob Kumar');
+    expect((await store().getConversation(CAROL_ID)).title).toBe('My nickname for Carol');
+    // Nothing left to name: no second upload of the address book.
+    expect(await discovery.nameConversationsFromContacts()).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(contacts().requests).toBe(0); // never prompts
+  });
+
+  it('does nothing without Contacts permission (no prompt, no upload)', async () => {
+    await store().ensureConversation(BOB_ID);
+    setPhoneBook([{ fullName: 'Bob Kumar', phones: [{ number: '+919812345678' }] }], {
+      status: 'undetermined',
+    });
+    const calls = registered({ '+919812345678': { id: BOB_ID } });
+
+    expect(await discovery.nameConversationsFromContacts()).toBe(0);
+
+    expect(contacts().requests).toBe(0);
+    expect(contacts().reads).toEqual([]);
+    expect(calls).toEqual([]);
+    expect((await store().getConversation(BOB_ID)).title).toBeNull();
+  });
+
+  it('opening New Chat also names existing unnamed chats', async () => {
+    await store().ensureConversation(BOB_ID);
+    setPhoneBook([{ fullName: 'Bob Kumar', phones: [{ number: '+919812345678' }] }]);
+    registered({ '+919812345678': { id: BOB_ID } });
+
+    await discovery.discoverContacts();
+
+    expect((await store().getConversation(BOB_ID)).title).toBe('Bob Kumar');
+  });
+});
+
 describe('New Chat screen', () => {
   let React;
   let act;
