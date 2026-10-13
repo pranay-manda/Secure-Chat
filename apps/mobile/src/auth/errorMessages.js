@@ -27,6 +27,16 @@ export function authErrorMessage(err) {
       return "We couldn't send the code. Please try again.";
     case ERROR_CODE.DEVICE_REVOKED:
       return 'This device was signed out. Request a new code to sign in again.';
+    case ERROR_CODE.PHONE_NUMBER_REQUIRED:
+      return 'Enter your phone number to create your account.';
+    case ERROR_CODE.PHONE_NUMBER_TAKEN:
+      return 'This phone number is already used by another CipherChat account.';
+    case ERROR_CODE.PHONE_NUMBER_MISMATCH:
+      return 'This email is registered with a different phone number. Go back and check the number.';
+    case ERROR_CODE.EMAIL_TAKEN:
+      return 'This email is already used by another CipherChat account.';
+    case ERROR_CODE.ALREADY_SET:
+      return 'This is already set on your account.';
     case ERROR_CODE.SERVICE_UNAVAILABLE:
       return 'Service is temporarily unavailable. Please try again shortly.';
     default:

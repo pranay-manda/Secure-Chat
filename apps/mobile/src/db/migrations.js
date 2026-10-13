@@ -164,4 +164,81 @@ export const MIGRATIONS = [
       ALTER TABLE outbox ADD COLUMN recipient_registration_id INTEGER;
     `,
   },
+  {
+    // Voice call history. Kept only on this phone (the server keeps no call history); missed
+    // calls this phone never saw ring arrive from the server's short-lived notes.
+    version: 6,
+    sql: `
+      CREATE TABLE IF NOT EXISTS call_log (
+        call_id TEXT PRIMARY KEY NOT NULL,
+        peer_user_id TEXT NOT NULL,
+        direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+        -- answered | missed | declined | no_answer | cancelled | busy | unavailable | failed
+        outcome TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        connected_at INTEGER,
+        ended_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_call_log_recent ON call_log (started_at);
+      CREATE INDEX IF NOT EXISTS idx_call_log_peer ON call_log (peer_user_id, started_at);
+    `,
+  },
+  {
+    // Video calls: the history says which kind a call was. Existing rows were voice calls.
+    version: 7,
+    sql: `
+      ALTER TABLE call_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'voice'
+        CHECK (kind IN ('voice', 'video'));
+    `,
+  },
+  {
+    // Photos, videos and voice notes. One attachment per message. The file is stored ONLY as
+    // its encrypted blob (AES-256-GCM, the same bytes that were uploaded) in the app's private
+    // files directory; its key and digest live here, inside this SQLCipher database. Plaintext
+    // exists only as short-lived temporary files while something is being viewed or played.
+    version: 8,
+    sql: `
+      CREATE TABLE IF NOT EXISTS attachments (
+        message_id INTEGER PRIMARY KEY NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+        direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+        -- image | video | audio
+        kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'audio')),
+        voice_note INTEGER NOT NULL DEFAULT 0,
+        content_type TEXT NOT NULL,
+        -- Server attachment id (outgoing: known once the upload slot exists).
+        attachment_id TEXT,
+        -- Outgoing: idempotency key of the upload (a retry reuses the server's attachment).
+        client_attachment_id TEXT UNIQUE,
+        media_key TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        -- Plaintext bytes (the blob is padded) and optional display metadata.
+        size INTEGER NOT NULL,
+        width INTEGER,
+        height INTEGER,
+        duration_ms INTEGER,
+        -- Name of the encrypted blob in the attachments directory (null until it is stored).
+        file_name TEXT,
+        -- out: encrypted -> uploaded. in: pending -> downloaded, or failed (see error).
+        state TEXT NOT NULL,
+        error TEXT,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_attachments_state ON attachments (direction, state);
+    `,
+  },
+  {
+    // The phone number of someone who messaged us (from GET /contacts/peers), shown when they
+    // are not in the address book, like WhatsApp. A contact name (title) always wins.
+    version: 9,
+    sql: `
+      ALTER TABLE conversations ADD COLUMN peer_phone TEXT;
+    `,
+  },
+  {
+    // Voice-note waveform (loudness bars measured while recording; see media/waveform.js).
+    version: 10,
+    sql: `
+      ALTER TABLE attachments ADD COLUMN waveform TEXT;
+    `,
+  },
 ];

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text } from 'react-native';
 
 import { EmptyState, ListRow, SectionHeader } from '../../components/design';
+import { ENDPOINTS } from '../../config/endpoints';
 import { apiRequest, NetworkError } from '../../lib/api';
 import { colors, spacing, type } from '../../theme';
 
@@ -13,7 +14,7 @@ export default function DevicesScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    apiRequest('GET', '/devices')
+    apiRequest('GET', ENDPOINTS.DEVICES.ROOT)
       .then((data) => !cancelled && (setDevices(data.devices), setError(null)))
       .catch((err) => {
         if (!cancelled) {

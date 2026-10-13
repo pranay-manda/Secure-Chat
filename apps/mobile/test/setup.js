@@ -257,6 +257,13 @@ jest.mock('expo-notifications', () => {
       return { remove: () => listeners.delete(listener) };
     }),
     dismissAllNotificationsAsync: jest.fn(async () => {}),
+    // Notifications currently shown in the tray (tests put them in notify.presented).
+    getPresentedNotificationsAsync: jest.fn(async () => [...(state().presented ?? [])]),
+    dismissNotificationAsync: jest.fn(async (identifier) => {
+      state().presented = (state().presented ?? []).filter(
+        (n) => n.request.identifier !== identifier,
+      );
+    }),
     unregisterForNotificationsAsync: jest.fn(async () => {
       state().unregistered += 1;
     }),
@@ -341,4 +348,156 @@ jest.mock('expo-screen-capture', () => {
 jest.mock('../modules/signal-protocol', () => ({
   isSignalAvailable: () => true,
   getSignalNative: () => require('./mocks/signalNativeMock').signalNativeMock,
+}));
+
+// Android's call foreground service has no Node equivalent; the real wrapper would also load
+// the `expo` package, which replaces the global fetch the tests' fake server relies on.
+jest.mock('../modules/call-service', () => ({
+  startCallService: jest.fn(() => false),
+  stopCallService: jest.fn(),
+}));
+
+// Media: expo-file-system on a per-device temp directory, and the MediaCrypto native module as
+// a Node implementation of the same blob format (see mocks/).
+jest.mock('expo-file-system', () => require('./mocks/fileSystemMock'));
+jest.mock('../modules/media-crypto', () => ({
+  isMediaCryptoAvailable: () => true,
+  getMediaCrypto: () => require('./mocks/mediaCryptoMock').mediaCryptoMock,
+}));
+
+/** expo-image-picker: the next result is `globalThis.__device.pickResult` (default: cancelled). */
+jest.mock('expo-image-picker', () => ({
+  launchImageLibraryAsync: jest.fn(
+    async () => globalThis.__device.pickResult ?? { canceled: true },
+  ),
+}));
+
+/**
+ * expo-audio: a recorder that "records" into the device's cache/Audio directory and a player
+ * with observable state. Per-device `globalThis.__device.audio`: `permission`, `players`.
+ */
+jest.mock('expo-audio', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { Paths } = require('./mocks/fileSystemMock');
+  const state = () =>
+    (globalThis.__device.audio ??= {
+      permission: { granted: true, canAskAgain: true },
+      players: [],
+    });
+  const recorder = {
+    isRecording: false,
+    uri: null,
+    durationMillis: 0,
+    async prepareToRecordAsync() {
+      const dir = path.join(Paths.cache.path, 'Audio');
+      fs.mkdirSync(dir, { recursive: true });
+      this.uri = `file://${path.join(dir, `recording-${Date.now()}.m4a`).replace(/\\/g, '/')}`;
+    },
+    record() {
+      this.isRecording = true;
+      fs.writeFileSync(decodeURI(this.uri.slice(7)), Buffer.from('fake-aac-audio'.repeat(200)));
+    },
+    async stop() {
+      this.isRecording = false;
+    },
+    // Microphone level for the waveform (dBFS; speech-like).
+    getStatus() {
+      return { isRecording: this.isRecording, durationMillis: this.durationMillis, metering: -20 };
+    },
+  };
+  return {
+    requestRecordingPermissionsAsync: jest.fn(async () => ({ ...state().permission })),
+    useAudioRecorder: () => recorder,
+    useAudioRecorderState: () => ({
+      isRecording: recorder.isRecording,
+      durationMillis: recorder.durationMillis,
+      canRecord: true,
+    }),
+    // Like the real hook: one player per component for its whole life.
+    useAudioPlayer: (initialSource = null) =>
+      require('react').useState(() => createPlayer(initialSource))[0],
+    useAudioPlayerStatus: (player) => ({
+      playing: player.playing,
+      currentTime: 0,
+      duration: 0,
+      didJustFinish: false,
+    }),
+    setAudioModeAsync: jest.fn(async () => {}),
+  };
+
+  function createPlayer(initialSource) {
+    {
+      const player = {
+        source: initialSource,
+        playing: false,
+        replace(source) {
+          this.source = source;
+        },
+        play() {
+          this.playing = true;
+        },
+        pause() {
+          this.playing = false;
+        },
+        rate: 1,
+        setPlaybackRate(rate) {
+          this.rate = rate;
+        },
+        seeks: [],
+        async seekTo(seconds) {
+          this.seeks.push(seconds);
+        },
+      };
+      state().players.push(player);
+      return player;
+    }
+  }
+});
+
+/**
+ * expo-camera: a camera that "takes" photos and videos into the device's cache/Camera
+ * directory (like the real module). `globalThis.__device.cameraPermission` overrides access.
+ */
+jest.mock('expo-camera', () => {
+  const React = require('react');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { Paths } = require('./mocks/fileSystemMock');
+  const write = (extension) => {
+    const dir = path.join(Paths.cache.path, 'Camera');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(
+      dir,
+      `${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`,
+    );
+    fs.writeFileSync(file, Buffer.alloc(4000, 7));
+    return `file://${file.split(path.sep).join('/')}`;
+  };
+  const CameraView = React.forwardRef(function CameraView(_props, ref) {
+    React.useImperativeHandle(ref, () => ({
+      takePictureAsync: async () => ({ uri: write('jpg'), width: 1080, height: 1920 }),
+      recordAsync: () =>
+        new Promise((resolve) => {
+          globalThis.__device.finishRecording = () => resolve({ uri: write('mp4') });
+        }),
+      stopRecording: () => globalThis.__device.finishRecording?.(),
+    }));
+    return null;
+  });
+  const permission = () =>
+    globalThis.__device.cameraPermission ?? { granted: true, canAskAgain: true, status: 'granted' };
+  return {
+    CameraView,
+    useCameraPermissions: () => [permission(), jest.fn(async () => permission())],
+    useMicrophonePermissions: () => [
+      { granted: true, canAskAgain: true, status: 'granted' },
+      jest.fn(async () => ({ granted: true })),
+    ],
+  };
+});
+
+jest.mock('expo-video', () => ({
+  useVideoPlayer: jest.fn(() => ({ play() {}, pause() {} })),
+  VideoView: () => null,
 }));

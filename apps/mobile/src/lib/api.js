@@ -1,7 +1,11 @@
 import { ERROR_CODE } from '@secure-chat/shared/constants';
+import { getRandomBytesAsync } from 'expo-crypto';
 
 import { getCachedSession, loadSession, saveSession, sessionFromTokens } from '../auth/tokenStore';
+import { ENDPOINTS } from '../config/endpoints';
+import { bytesToBase64 } from '../crypto/encoding';
 import { env } from '../config/env';
+import { markReachable, markUnreachable } from './connectivity';
 import { getDeviceId } from './deviceId';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -64,10 +68,12 @@ async function send(method, path, { body, accessToken, timeoutMs = DEFAULT_TIMEO
       signal: controller.signal,
     });
   } catch (err) {
+    markUnreachable(); // the backend could not be reached at all (see lib/connectivity.js)
     throw new NetworkError(err?.name === 'AbortError' ? 'Request timed out' : undefined);
   } finally {
     clearTimeout(timer);
   }
+  markReachable(); // any answer, even an error, proves the backend is reachable
 
   const data = response.status === 204 ? null : await response.json().catch(() => null);
   return { status: response.status, data, headers: response.headers };
@@ -88,6 +94,37 @@ const SESSION_ENDING_CODES = new Set([
   ERROR_CODE.DEVICE_REVOKED,
 ]);
 
+/** 32 random bytes as base64url without padding: the server's refresh-secret format. */
+async function newRefreshSecret() {
+  const base64 = bytesToBase64(await getRandomBytesAsync(32));
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * The rotation this refresh performs: the current refresh token and the secret proposed for
+ * the next one, saved with the session BEFORE the request is sent. If the answer is lost
+ * (timeout, dropped connection, app reloaded or killed), the server may already have rotated;
+ * sending exactly the same request again lets it recognise the retry instead of seeing a spent
+ * token, which it must treat as theft. A new proposal is made only for a new refresh token.
+ */
+async function pendingRotation(session) {
+  if (session.pendingRefresh?.from === session.refreshToken) return session.pendingRefresh;
+  const pendingRefresh = { from: session.refreshToken, nextSecret: await newRefreshSecret() };
+  assertSessionUnchanged(session.refreshToken);
+  await saveSession({ ...session, pendingRefresh });
+  return pendingRefresh;
+}
+
+/**
+ * Signed out (or signed in again) while a refresh ran: its outcome belongs to a session that
+ * no longer exists here, and saving it would bring signed-out credentials back.
+ */
+function assertSessionUnchanged(refreshToken) {
+  if (getCachedSession()?.refreshToken !== refreshToken) {
+    throw new SessionExpiredError(ERROR_CODE.UNAUTHENTICATED);
+  }
+}
+
 async function performRefresh() {
   const session = await loadSession();
   if (!session?.refreshToken) {
@@ -95,12 +132,19 @@ async function performRefresh() {
     throw new SessionExpiredError(ERROR_CODE.REFRESH_TOKEN_INVALID);
   }
 
-  const result = await send('POST', '/auth/refresh', {
-    body: { refreshToken: session.refreshToken, deviceId: await getDeviceId() },
+  const pending = await pendingRotation(session);
+  const result = await send('POST', ENDPOINTS.AUTH.REFRESH, {
+    body: {
+      refreshToken: pending.from,
+      deviceId: await getDeviceId(),
+      nextRefreshSecret: pending.nextSecret,
+    },
   });
+  assertSessionUnchanged(pending.from);
 
   if (result.status === 200) {
-    // Persist before use: the old refresh token is now spent on the server.
+    // Persist before use: the old refresh token is now spent on the server. The new session
+    // has no pending rotation.
     await saveSession(sessionFromTokens(result.data.tokens, session.user));
     stats.refreshes += 1;
     return getCachedSession().accessToken;
@@ -111,7 +155,11 @@ async function performRefresh() {
     await onSessionEnded(error.code);
     throw new SessionExpiredError(error.code);
   }
-  // 429 / 5xx: temporary; keep the session and let the caller retry later.
+  // 400: the server rejected the request before rotating anything, so the next attempt can
+  // safely propose a new secret.
+  if (result.status === 400) await saveSession({ ...getCachedSession(), pendingRefresh: null });
+  // 429 / 5xx / no answer (NetworkError, above): temporary. The session and the pending
+  // rotation are kept; the server may have rotated, and only the same request recovers that.
   throw error;
 }
 

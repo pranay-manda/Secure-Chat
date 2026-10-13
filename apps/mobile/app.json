@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Secure Chat",
+    "name": "CipherChat",
     "slug": "secure-chat",
     "scheme": "securechat",
     "version": "0.1.0",
@@ -9,7 +9,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.securechat.app"
+      "bundleIdentifier": "com.securechat.app",
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"]
+      }
     },
     "android": {
       "package": "com.securechat.app",
@@ -18,11 +21,16 @@
         "android.permission.WRITE_CONTACTS",
         "android.permission.SYSTEM_ALERT_WINDOW",
         "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE"
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.ACCESS_MEDIA_LOCATION"
       ],
       "allowBackup": false,
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0b6e4f",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -48,15 +56,48 @@
       [
         "expo-contacts",
         {
-          "contactsPermission": "Secure Chat checks which of your contacts use Secure Chat. Only phone numbers are checked; names never leave your phone."
+          "contactsPermission": "CipherChat checks which of your contacts use CipherChat. Only phone numbers are checked; names never leave your phone."
         }
       ],
       [
         "expo-local-authentication",
         {
-          "faceIDPermission": "Allow Secure Chat to use Face ID to open your locked chats."
+          "faceIDPermission": "Allow CipherChat to use Face ID to open your locked chats."
         }
       ],
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "microphonePermission": "CipherChat uses the microphone for voice and video calls.",
+          "cameraPermission": "CipherChat uses the camera for video calls."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "CipherChat lets you choose photos and videos to send in a chat.",
+          "cameraPermission": "CipherChat uses the camera for video calls."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "CipherChat uses the microphone for calls and voice messages.",
+          "enableBackgroundPlayback": false,
+          "enableBackgroundRecording": false
+        }
+      ],
+      "expo-video",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "CipherChat uses the camera for video calls and to take photos and videos to send in a chat.",
+          "microphonePermission": "CipherChat uses the microphone for calls, voice messages and videos you record.",
+          "recordAudioAndroid": true,
+          "barcodeScannerEnabled": false
+        }
+      ],
+      "./plugins/withVoiceCallsAndroid",
       "./plugins/withSqlcipherOpenssl",
       "./plugins/withLibsignalAndroid",
       "./plugins/withLibsignalIos",
@@ -64,9 +105,9 @@
         "expo-splash-screen",
         {
           "image": "./assets/splash-icon.png",
-          "imageWidth": 160,
+          "imageWidth": 180,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff"
+          "backgroundColor": "#0b6e4f"
         }
       ]
     ],

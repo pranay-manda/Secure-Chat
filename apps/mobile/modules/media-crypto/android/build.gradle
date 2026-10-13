@@ -1,0 +1,25 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.mediacrypto'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.mediacrypto"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+repositories {
+  maven { url 'https://build-artifacts.signal.org/libraries/maven/' }
+  mavenCentral()
+}
+
+dependencies {
+  // Streaming AES-256-GCM from the official libsignal (same release as modules/signal-protocol).
+  implementation 'org.signal:libsignal-android:0.105.0'
+}

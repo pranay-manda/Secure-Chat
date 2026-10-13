@@ -48,7 +48,11 @@ function SecurityCodeContent({ peer }) {
         getConversation(peer),
       ]);
       if (!cancelled) {
-        setState({ loading: false, code, name: peerLabel(peer, conversation?.title) });
+        setState({
+          loading: false,
+          code,
+          name: peerLabel(peer, conversation?.title, conversation?.peerPhone),
+        });
       }
     })().catch(() => !cancelled && setState((s) => ({ ...s, loading: false })));
     return () => {
@@ -77,7 +81,7 @@ function SecurityCodeContent({ peer }) {
   const confirmAccept = () =>
     Alert.alert(
       'Accept new security code?',
-      `Only accept if you compared this code with ${name}, or you know why it changed (for example, they reinstalled Secure Chat or signed in again).`,
+      `Only accept if you compared this code with ${name}, or you know why it changed (for example, they reinstalled CipherChat or signed in again).`,
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Accept', onPress: accept },
@@ -111,7 +115,7 @@ function SecurityCodeContent({ peer }) {
       </Text>
       {code.pending ? (
         <Text style={styles.body}>
-          {name}&apos;s security code changed. This usually happens when they reinstall Secure Chat
+          {name}&apos;s security code changed. This usually happens when they reinstall CipherChat
           or sign in again, but it could also mean someone is trying to intercept your messages.
           Their new messages are held, and yours won&apos;t be sent, until you accept the new code.
         </Text>

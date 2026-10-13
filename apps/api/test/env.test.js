@@ -62,40 +62,72 @@ describe('loadEnv', () => {
     expect(() => loadEnv(production)).not.toThrow(/MONGODB_URI|REDIS_URL/);
   });
 
-  it('requires the Resend key and sender when EMAIL_PROVIDER=resend (the default)', () => {
-    const resend = { ...TEST_ENV, EMAIL_PROVIDER: undefined };
-    expect(() => loadEnv(resend)).toThrow(/RESEND_API_KEY: required when EMAIL_PROVIDER=resend/);
-    expect(() => loadEnv(resend)).toThrow(/RESEND_FROM_EMAIL: required/);
+  const SMTP_ENV = {
+    SMTP_HOST: 'smtp.gmail.com',
+    SMTP_PORT: '587',
+    SMTP_USER: 'otp@example.com',
+    SMTP_PASS: 'abcdefghijklmnop',
+  };
 
-    const config = loadEnv({
-      ...resend,
-      RESEND_API_KEY: 're_abc123_DEF',
-      RESEND_FROM_EMAIL: 'Secure Chat <no-reply@example.com>',
-    });
+  it('requires SMTP host, port, user and password when EMAIL_PROVIDER=smtp (the default)', () => {
+    const smtp = { ...TEST_ENV, EMAIL_PROVIDER: undefined };
+    for (const key of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS']) {
+      expect(() => loadEnv(smtp)).toThrow(new RegExp(`${key}: required when EMAIL_PROVIDER=smtp`));
+      // Each one is required on its own; an empty value counts as missing.
+      expect(() => loadEnv({ ...smtp, ...SMTP_ENV, [key]: '' })).toThrow(new RegExp(key));
+    }
+
+    const config = loadEnv({ ...smtp, ...SMTP_ENV });
     expect(config.email).toMatchObject({
-      provider: 'resend',
-      from: 'Secure Chat <no-reply@example.com>',
+      provider: 'smtp',
+      smtp: {
+        host: 'smtp.gmail.com',
+        port: 587,
+        user: 'otp@example.com',
+        pass: 'abcdefghijklmnop',
+        from: 'otp@example.com', // SMTP_FROM defaults to SMTP_USER
+      },
       otpTtlSeconds: 300,
     });
   });
 
-  it('validates Resend settings without echoing the key', () => {
-    const key = 'sk_live_not_a_resend_key';
+  it('uses SMTP_FROM as the sender when set', () => {
+    const config = loadEnv({
+      ...TEST_ENV,
+      EMAIL_PROVIDER: 'smtp',
+      ...SMTP_ENV,
+      SMTP_FROM: 'CipherChat <no-reply@example.com>',
+    });
+    expect(config.email.smtp.from).toBe('CipherChat <no-reply@example.com>');
+  });
+
+  it('validates SMTP settings without echoing the password', () => {
+    const pass = 'super-secret-app-password';
     try {
-      loadEnv({ ...TEST_ENV, EMAIL_PROVIDER: 'resend', RESEND_API_KEY: key });
-      expect.unreachable();
-    } catch (err) {
-      expect(err.message).toMatch(/RESEND_API_KEY: must be a Resend API key/);
-      expect(err.message).not.toContain(key);
-    }
-    expect(() =>
       loadEnv({
         ...TEST_ENV,
-        EMAIL_PROVIDER: 'resend',
-        RESEND_API_KEY: 're_abc',
-        RESEND_FROM_EMAIL: 'not an address',
-      }),
-    ).toThrow(/RESEND_FROM_EMAIL/);
+        EMAIL_PROVIDER: 'smtp',
+        SMTP_HOST: 'smtps://smtp.gmail.com',
+        SMTP_PORT: '70000',
+        SMTP_USER: 'otp-user', // not an email address, and no SMTP_FROM
+        SMTP_PASS: pass,
+      });
+      expect.unreachable();
+    } catch (err) {
+      expect(err.message).toMatch(/SMTP_HOST: must be a host name/);
+      expect(err.message).toMatch(/SMTP_PORT/);
+      expect(err.message).toMatch(/SMTP_FROM: required when SMTP_USER is not an email address/);
+      expect(err.message).not.toContain(pass);
+    }
+    expect(() =>
+      loadEnv({ ...TEST_ENV, EMAIL_PROVIDER: 'smtp', ...SMTP_ENV, SMTP_FROM: 'not an address' }),
+    ).toThrow(/SMTP_FROM: must be an email address/);
+  });
+
+  it('refuses the old resend provider with a clear message', () => {
+    expect(() => loadEnv({ ...TEST_ENV, EMAIL_PROVIDER: 'resend' })).toThrow(
+      /EMAIL_PROVIDER: must be smtp, console or none \(resend was replaced by smtp/,
+    );
   });
 
   it('allows production without SMS (phone sign-in off) but not with console email', () => {
@@ -107,16 +139,12 @@ describe('loadEnv', () => {
       SMS_PROVIDER: 'none',
     };
     expect(() => loadEnv(production)).toThrow(
-      /EMAIL_PROVIDER: console provider is for development/,
+      /EMAIL_PROVIDER: console provider is for development only; use smtp/,
     );
 
-    const config = loadEnv({
-      ...production,
-      EMAIL_PROVIDER: 'resend',
-      RESEND_API_KEY: 're_abc123',
-      RESEND_FROM_EMAIL: 'no-reply@example.com',
-    });
+    const config = loadEnv({ ...production, EMAIL_PROVIDER: 'smtp', ...SMTP_ENV });
     expect(config.sms.provider).toBe('none');
+    expect(config.email.provider).toBe('smtp');
   });
 
   it('requires at least one OTP channel', () => {

@@ -24,7 +24,10 @@ import { HttpError } from '../../middleware/errors.js';
  */
 export function createOtpService({ redis, delivery, config, logger }) {
   // `phone:` prefix keeps keys identical to Phase 1, so codes in flight survive a deploy.
-  const identityKey = ({ channel, value }) => hmacSha256(config.hmacSecret, `${channel}:${value}`);
+  // `purpose` separates codes for other uses (e.g. adding an email to an account) from sign-in
+  // codes: one can never be used as the other. Sign-in keys are unchanged.
+  const identityKey = ({ channel, value, purpose }) =>
+    hmacSha256(config.hmacSecret, `${purpose ? `${purpose}:` : ''}${channel}:${value}`);
   const codeHash = (key, otp) => hmacSha256(config.hmacSecret, `otp:${key}:${otp}`);
   const otpKey = (key) => `otp:${key}`;
   const cooldownKey = (key) => `otp:cd:${key}`;

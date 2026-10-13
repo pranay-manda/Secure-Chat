@@ -369,6 +369,17 @@ export async function saveIncomingMessage(message) {
   );
 }
 
+/**
+ * Removes the placeholder of a message held for a security-code change that, once decrypted,
+ * turned out not to be a chat message (internal content). Any other row is left untouched.
+ */
+export async function deleteHeldMessage(serverMessageId) {
+  await getDatabase().runAsync(
+    "DELETE FROM messages WHERE server_message_id = ? AND status = 'identity_pending';",
+    serverMessageId,
+  );
+}
+
 export async function listMessages(peerUserId, limit = 50) {
   return getDatabase().getAllAsync(
     `SELECT id, peer_user_id AS peerUserId, direction, body, status, created_at AS createdAt

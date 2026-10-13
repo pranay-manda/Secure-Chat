@@ -1,11 +1,27 @@
 import { CIPHERTEXT_TYPE, ERROR_CODE, LIMITS, SIGNAL } from '@secure-chat/shared/constants';
+import { deviceIdSchema } from '@secure-chat/shared/validation';
 import { randomUUID } from 'expo-crypto';
 
 import { getSignalNative } from '../../modules/signal-protocol';
+import { ENDPOINTS } from '../config/endpoints';
 import { ApiError, apiRequest, NetworkError } from '../lib/api';
+import {
+  contentForAttachment,
+  ensureUploaded,
+  incomingAttachmentFields,
+  MediaError,
+  settlePrepared,
+} from '../media/attachmentService';
+import * as attachments from '../media/attachmentStore';
+import { CONTENT_TYPE, decodeContent, encodeContent, textContent } from '../messaging/content';
 import * as messages from '../messaging/messageStore';
-import { LOCAL_STATUS, UNTRUSTED_IDENTITY } from '../messaging/messageStore';
-import { base64ToUtf8, utf8ToBase64 } from './encoding';
+import {
+  INVALID_CONTENT,
+  LOCAL_STATUS,
+  UNSUPPORTED_CONTENT,
+  UNTRUSTED_IDENTITY,
+} from '../messaging/messageStore';
+import { base64ToBytes, bytesToBase64 } from './encoding';
 import * as store from './signalStore';
 
 /**
@@ -16,6 +32,8 @@ import * as store from './signalStore';
 
 const NEXT_PREKEY_ID = 'next_prekey_id';
 const ENVELOPE_CURSOR = 'envelope_cursor';
+/** Envelope error: it decrypted to internal content, which is never a chat message. */
+const INTERNAL_CONTENT = 'INTERNAL_CONTENT';
 
 const randomKeyId = () => 1 + Math.floor(Math.random() * (SIGNAL.MAX_KEY_ID - 1));
 
@@ -69,13 +87,13 @@ export function ensureKeysRegistered() {
 
 async function registerKeys() {
   const identity = await ensureIdentity();
-  let { status } = await apiRequest('GET', '/keys/status');
+  let { status } = await apiRequest('GET', ENDPOINTS.KEYS.STATUS);
 
   if (!status.registered) {
     const { signed, kyber } = await newSignedAndKyberPreKeys(identity);
     const oneTimePreKeys = await generateOneTimePreKeys(SIGNAL.ONE_TIME_PREKEY_BATCH);
 
-    const result = await apiRequest('PUT', '/keys', {
+    const result = await apiRequest('PUT', ENDPOINTS.KEYS.ROOT, {
       body: {
         registrationId: identity.registrationId,
         identityKey: identity.identityKey,
@@ -93,7 +111,7 @@ async function registerKeys() {
 
   if (status.oneTimePreKeyCount < SIGNAL.ONE_TIME_PREKEY_LOW_WATERMARK) {
     const preKeys = await generateOneTimePreKeys(SIGNAL.ONE_TIME_PREKEY_BATCH);
-    return (await apiRequest('POST', '/keys/one-time', { body: { preKeys } })).status;
+    return (await apiRequest('POST', ENDPOINTS.KEYS.ONE_TIME, { body: { preKeys } })).status;
   }
   return status;
 }
@@ -150,7 +168,7 @@ async function rotateSignedPreKeysIfDue(identity, status) {
   if (due || serverBehind) {
     const next = await newSignedAndKyberPreKeys(identity);
     uploaded = (
-      await apiRequest('PUT', '/keys', {
+      await apiRequest('PUT', ENDPOINTS.KEYS.ROOT, {
         body: {
           registrationId: identity.registrationId,
           identityKey: identity.identityKey,
@@ -188,7 +206,7 @@ function untrustedIdentityError() {
  * recorded for the user to review and the trusted key is left as it is.
  */
 async function establishSession(local, peerUserId) {
-  const { bundle } = await apiRequest('GET', `/keys/bundle/${peerUserId}`);
+  const { bundle } = await apiRequest('GET', ENDPOINTS.KEYS.bundle(peerUserId));
   const address = store.addressOf(peerUserId, bundle.signalDeviceId);
   const trustedIdentityKey = await store.loadPeerIdentity(address);
   let result;
@@ -238,7 +256,7 @@ function isTemporary(err) {
  * the advanced session, so the ciphertext that will be sent is exactly the one the ratchet
  * produced. Runs only when the message has no outbox entry yet.
  */
-function encryptToOutbox(myUserId, message) {
+function encryptToOutbox(myUserId, message, attachment = null) {
   return withSignalLock(async () => {
     const existing = await messages.loadOutbox(message.clientMessageId);
     if (existing) return existing;
@@ -260,7 +278,11 @@ function encryptToOutbox(myUserId, message) {
         identityKey: await store.loadPeerIdentity(address),
         session: await store.loadSession(address),
       },
-      utf8ToBase64(message.body),
+      bytesToBase64(
+        encodeContent(
+          attachment ? contentForAttachment(attachment, message.body) : textContent(message.body),
+        ),
+      ),
     );
     const entry = {
       clientMessageId: message.clientMessageId,
@@ -275,6 +297,112 @@ function encryptToOutbox(myUserId, message) {
       await messages.saveOutbox(entry);
     });
     return entry;
+  });
+}
+
+// --- Internal content outside the chat (call-security attestations) ---
+
+/**
+ * Encrypts internal content (messaging/content.js bytes) for `peerUserId` on the regular Signal
+ * session, for a channel other than chat messages (a call's attestation, sent with its
+ * signaling). Same lock and atomic session update as a message; nothing else is stored: no
+ * message, outbox entry or conversation. Refused while the peer's new security code is
+ * undecided. `fresh` first replaces the session with one built from a new key bundle (the
+ * server said the peer registered new keys); a changed identity key is refused there and
+ * recorded for the user to review, as for messages.
+ *
+ * @returns {Promise<{ type: number, body: string, recipientRegistrationId: number | null }>}
+ */
+export function sealForPeer(myUserId, peerUserId, bytes, { fresh = false } = {}) {
+  return withSignalLock(async () => {
+    if (await store.getPendingIdentityChange(peerUserId)) throw untrustedIdentityError();
+    const local = await localContext(myUserId);
+    let peer = await store.loadPeerDevice(peerUserId);
+    if (fresh && peer) {
+      const stale = store.addressOf(peerUserId, peer.signalDeviceId);
+      await store.inTransaction(async () => {
+        await store.deleteSession(stale);
+        await store.deletePeerDevice(peerUserId);
+      });
+      peer = null;
+    }
+    const hasSession =
+      peer && (await store.loadSession(store.addressOf(peerUserId, peer.signalDeviceId)));
+    if (!hasSession) peer = await establishSession(local, peerUserId);
+    const address = store.addressOf(peerUserId, peer.signalDeviceId);
+    const encrypted = await getSignalNative().encrypt(
+      local,
+      {
+        name: peerUserId,
+        deviceId: peer.signalDeviceId,
+        identityKey: await store.loadPeerIdentity(address),
+        session: await store.loadSession(address),
+      },
+      bytesToBase64(bytes),
+    );
+    await store.saveSession(address, encrypted.session);
+    return {
+      type: encrypted.type,
+      body: encrypted.body,
+      recipientRegistrationId: encrypted.remoteRegistrationId ?? null,
+    };
+  });
+}
+
+/**
+ * Decrypts internal content `sender.userId` sent outside the chat (a call's attestation) on the
+ * Signal session with that person: the session and its trusted identity key decide who it is
+ * from. `sender.deviceId` (from the server) is never trusted for that; like an envelope's
+ * sender device, it only routes this phone's later messages to the peer. Under the Signal lock,
+ * in one transaction: session, peer identity (first contact), peer device, used pre-key. No
+ * message, conversation or receipt is created.
+ *
+ * Throws a coded error: UNTRUSTED_IDENTITY (the peer's identity key changed; recorded for the
+ * user to review, nothing decrypted), DUPLICATE_MESSAGE (already decrypted once), or another
+ * libsignal failure.
+ *
+ * @returns {Promise<object>} the decodeContent() result
+ */
+export function openFromPeer(myUserId, sender, ciphertext) {
+  return withSignalLock(async () => {
+    const native = getSignalNative();
+    const address = store.addressOf(sender.userId, SIGNAL.DEFAULT_DEVICE_ID);
+    const keys = {};
+    if (ciphertext.type === CIPHERTEXT_TYPE.PREKEY) {
+      const info = await native.preKeyMessageInfo(ciphertext.body);
+      keys.preKey = info.preKeyId != null ? await store.loadPreKey(info.preKeyId) : null;
+      keys.signedPreKeys = await store.loadAllSignedPreKeys();
+      keys.kyberPreKeys = await store.loadAllKyberPreKeys();
+    }
+    let result;
+    try {
+      result = await native.decrypt(
+        await localContext(myUserId),
+        {
+          name: sender.userId,
+          deviceId: SIGNAL.DEFAULT_DEVICE_ID,
+          identityKey: await store.loadPeerIdentity(address),
+          session: await store.loadSession(address),
+        },
+        { type: ciphertext.type, body: ciphertext.body, ...keys },
+      );
+    } catch (err) {
+      if (err?.code === UNTRUSTED_IDENTITY && ciphertext.type === CIPHERTEXT_TYPE.PREKEY) {
+        const claimed = (await native.preKeyMessageInfo(ciphertext.body)).identityKey;
+        const trusted = await store.loadPeerIdentity(address);
+        await store.recordIdentityChange(sender.userId, address, trusted, claimed);
+      }
+      throw err;
+    }
+    await store.inTransaction(async () => {
+      await store.saveSession(address, result.session);
+      await store.savePeerIdentityIfNew(address, result.remoteIdentityKey);
+      if (deviceIdSchema.safeParse(sender.deviceId).success) {
+        await store.savePeerDevice(sender.userId, sender.deviceId, SIGNAL.DEFAULT_DEVICE_ID);
+      }
+      if (result.usedPreKeyId != null) await store.removePreKey(result.usedPreKeyId);
+    });
+    return decodeContent(base64ToBytes(result.plaintext));
   });
 }
 
@@ -301,8 +429,15 @@ async function attemptDelivery(myUserId, clientMessageId, { retryOnStale = true 
 
   let entry = await messages.loadOutbox(clientMessageId);
   try {
-    entry ??= await encryptToOutbox(myUserId, message);
-    const result = await apiRequest('POST', '/messages', {
+    if (!entry) {
+      // Held, like text, while the peer's new security code is undecided (nothing uploaded).
+      if (await store.getPendingIdentityChange(message.peerUserId)) throw untrustedIdentityError();
+      // A photo, video or voice note goes to storage (encrypted) before its Signal message,
+      // which then carries the server's attachment id with the key.
+      const attachment = await ensureUploaded(clientMessageId, message.peerUserId);
+      entry = await encryptToOutbox(myUserId, message, attachment);
+    }
+    const result = await apiRequest('POST', ENDPOINTS.MESSAGES.ROOT, {
       body: {
         recipientUserId: entry.recipientUserId,
         recipientDeviceId: entry.recipientDeviceId,
@@ -333,7 +468,11 @@ async function attemptDelivery(myUserId, clientMessageId, { retryOnStale = true 
       return attemptDelivery(myUserId, clientMessageId, { retryOnStale: false });
     }
     await messages.setOutgoingStatus(clientMessageId, LOCAL_STATUS.FAILED, {
-      error: isTemporary(err) ? 'TEMPORARY' : (err?.code ?? 'ERROR'),
+      error: isTemporary(err)
+        ? 'TEMPORARY'
+        : err instanceof MediaError
+          ? err.code
+          : (err?.code ?? 'ERROR'),
     });
     throw err;
   }
@@ -348,8 +487,12 @@ export async function sendText(myUserId, peerUserId, text) {
   return deliverOutgoing(myUserId, clientMessageId);
 }
 
-/** Stores an outgoing message (status `sending`); returns its clientMessageId. */
+/**
+ * Stores an outgoing message (status `sending`); returns its clientMessageId. Text that could
+ * never be sent (empty, or over the content limits) throws a ContentError and is not stored.
+ */
 export async function enqueueText(peerUserId, text) {
+  encodeContent(textContent(text));
   const clientMessageId = randomUUID();
   const createdAt = Date.now();
   await store.inTransaction(async () => {
@@ -363,6 +506,38 @@ export async function enqueueText(peerUserId, text) {
     });
     await messages.ensureConversation(peerUserId, { at: createdAt });
   });
+  return clientMessageId;
+}
+
+/**
+ * Stores an outgoing photo, video or voice note (already encrypted by prepareAttachment) with
+ * its message (status `sending`) in one transaction; returns its clientMessageId. The caption is
+ * the message body (empty for none).
+ */
+export async function enqueueAttachment(peerUserId, prepared, caption = '') {
+  const body = caption.trim();
+  if (body) encodeContent(textContent(body)); // same limits as a text message
+  const clientMessageId = randomUUID();
+  const createdAt = Date.now();
+  let stored = false;
+  try {
+    await store.inTransaction(async () => {
+      await store.insertMessage({
+        clientMessageId,
+        peerUserId,
+        direction: 'out',
+        body,
+        status: LOCAL_STATUS.SENDING,
+        createdAt,
+      });
+      const messageId = await attachments.messageRowId({ clientMessageId });
+      await attachments.insertAttachment(messageId, prepared);
+      await messages.ensureConversation(peerUserId, { at: createdAt });
+    });
+    stored = true;
+  } finally {
+    settlePrepared(prepared, { stored });
+  }
   return clientMessageId;
 }
 
@@ -443,7 +618,9 @@ async function processEnvelope(local, envelope) {
     return { ok: false, code };
   }
 
+  const incoming = incomingMessage(decodeContent(base64ToBytes(result.plaintext)));
   await store.inTransaction(async () => {
+    // The session advanced whatever the content is: always kept, like a used pre-key's removal.
     await store.saveSession(address, result.session);
     await store.savePeerIdentityIfNew(address, result.remoteIdentityKey);
     // Remember the sender's device so replies continue this session (no new bundle fetch).
@@ -453,17 +630,55 @@ async function processEnvelope(local, envelope) {
       envelope.senderSignalDeviceId,
     );
     if (result.usedPreKeyId != null) await store.removePreKey(result.usedPreKeyId);
-    await store.saveIncomingMessage({
-      serverMessageId: envelope.messageId,
-      peerUserId: envelope.senderUserId,
-      body: base64ToUtf8(result.plaintext),
-      status: LOCAL_STATUS.RECEIVED,
-      createdAt: serverTime(envelope),
-    });
-    await messages.ensureConversation(envelope.senderUserId, { at: serverTime(envelope) });
-    await store.markEnvelope(envelope.envelopeId, 'done');
+    if (incoming) {
+      const { attachment, ...message } = incoming;
+      await store.saveIncomingMessage({
+        serverMessageId: envelope.messageId,
+        peerUserId: envelope.senderUserId,
+        ...message,
+        createdAt: serverTime(envelope),
+      });
+      if (attachment) {
+        const messageId = await attachments.messageRowId({ serverMessageId: envelope.messageId });
+        await attachments.insertAttachment(messageId, attachment);
+      }
+      await messages.ensureConversation(envelope.senderUserId, { at: serverTime(envelope) });
+    } else {
+      // Internal content: no message, conversation, unread count or read receipt. If it was
+      // held for a security-code change, its placeholder goes too.
+      await store.deleteHeldMessage(envelope.messageId);
+    }
+    await store.markEnvelope(envelope.envelopeId, 'done', incoming ? null : INTERNAL_CONTENT);
   });
-  return { ok: true };
+  return incoming ? { ok: true } : { ok: false, code: INTERNAL_CONTENT };
+}
+
+/**
+ * What a decrypted message shows in the chat (see messaging/content.js), or null for internal
+ * content such as a call-security attestation, which never becomes a chat message wherever it
+ * came from. Text, versioned or from an app version before R1, is shown as text; a photo, video
+ * or voice note becomes a message (its caption) with an attachment row. Content this version
+ * cannot show (an unknown type or version, a file type it cannot display) and malformed content
+ * become a placeholder; nothing of that content is kept.
+ */
+function incomingMessage(decoded) {
+  if (decoded.internal) return null;
+  if (decoded.ok && decoded.content.type === CONTENT_TYPE.TEXT) {
+    return { body: decoded.content.text, status: LOCAL_STATUS.RECEIVED };
+  }
+  if (decoded.ok && decoded.content.type === CONTENT_TYPE.ATTACHMENT) {
+    // The key and digest go to the attachment row; the blob is fetched after this transaction.
+    const attachment = incomingAttachmentFields(decoded.content);
+    if (attachment) {
+      return { body: decoded.content.caption ?? '', status: LOCAL_STATUS.RECEIVED, attachment };
+    }
+  }
+  const malformed = !decoded.ok && decoded.reason === 'invalid';
+  return {
+    body: '',
+    status: LOCAL_STATUS.UNSUPPORTED,
+    error: malformed ? INVALID_CONTENT : UNSUPPORTED_CONTENT,
+  };
 }
 
 /**
@@ -524,7 +739,7 @@ async function runSyncInbox(myUserId) {
   for (;;) {
     const after = Number(await store.getSyncValue(ENVELOPE_CURSOR)) || 0;
     // The server's default page size is LIMITS.PAGE_SIZE_DEFAULT.
-    const { envelopes } = await apiRequest('GET', `/messages/envelopes?after=${after}`);
+    const { envelopes } = await apiRequest('GET', ENDPOINTS.MESSAGES.envelopes(after));
     if (envelopes.length === 0) break;
 
     let maxSeq = after;
@@ -535,7 +750,7 @@ async function runSyncInbox(myUserId) {
     results.push(...(await processPendingEnvelopes(myUserId)));
 
     // Acknowledge only after the envelopes are stored and processed locally.
-    await apiRequest('POST', '/messages/envelopes/ack', { body: { upToSeq: maxSeq } });
+    await apiRequest('POST', ENDPOINTS.MESSAGES.ENVELOPES_ACK, { body: { upToSeq: maxSeq } });
     await store.setSyncValue(ENVELOPE_CURSOR, maxSeq);
     if (envelopes.length < LIMITS.PAGE_SIZE_DEFAULT) break;
   }

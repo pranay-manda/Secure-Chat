@@ -88,3 +88,79 @@ describe('migration 5 (identity changes)', () => {
     await expect(insert('rejected-by-typo')).rejects.toThrow();
   });
 });
+
+describe('migration 6 (call history)', () => {
+  beforeEach(() => resetDevice());
+
+  it('upgrades a v5 database in place: existing chats stay, an empty call history appears', async () => {
+    const v5 = databaseAt(5);
+    await v5.openDatabase();
+    await v5.getDatabase().execAsync(`
+      INSERT INTO conversations (peer_user_id, title, created_at) VALUES ('peer1', 'Bob', 1);
+      INSERT INTO messages (server_message_id, peer_user_id, direction, body, status, created_at)
+        VALUES ('m1', 'peer1', 'in', 'hello', 'received', 2);
+    `);
+
+    const v6 = databaseAt(6);
+    await v6.openDatabase();
+    const db = v6.getDatabase();
+    expect((await db.getFirstAsync('PRAGMA user_version;')).user_version).toBe(6);
+    expect((await db.getFirstAsync('SELECT body FROM messages;')).body).toBe('hello');
+    expect((await db.getFirstAsync('SELECT count(*) AS n FROM call_log;')).n).toBe(0);
+
+    const insert = (callId, direction) =>
+      db.runAsync(
+        `INSERT INTO call_log (call_id, peer_user_id, direction, outcome, started_at, ended_at)
+         VALUES (?, 'peer1', ?, 'missed', 1, 2);`,
+        callId,
+        direction,
+      );
+    await insert('c1', 'in');
+    await expect(insert('c1', 'in')).rejects.toThrow(); // one row per call
+    await expect(insert('c2', 'sideways')).rejects.toThrow();
+
+    // Restart after the upgrade: nothing runs twice.
+    const again = databaseAt(6);
+    await again.openDatabase();
+    expect((await again.getDatabase().getFirstAsync('SELECT count(*) AS n FROM call_log;')).n).toBe(
+      1,
+    );
+  });
+});
+
+describe('migration 7 (video calls in the call history)', () => {
+  beforeEach(() => resetDevice());
+
+  it('upgrades a v6 database in place: earlier calls become voice calls, kinds are checked', async () => {
+    const v6 = databaseAt(6);
+    await v6.openDatabase();
+    await v6.getDatabase().execAsync(`
+      INSERT INTO call_log (call_id, peer_user_id, direction, outcome, started_at, ended_at)
+        VALUES ('c1', 'peer1', 'out', 'answered', 1, 2);
+    `);
+
+    const v7 = databaseAt(7);
+    await v7.openDatabase();
+    const db = v7.getDatabase();
+    expect((await db.getFirstAsync('PRAGMA user_version;')).user_version).toBe(7);
+    expect(await db.getFirstAsync('SELECT call_id AS id, kind FROM call_log;')).toEqual({
+      id: 'c1',
+      kind: 'voice',
+    });
+    const insert = (callId, kind) =>
+      db.runAsync(
+        `INSERT INTO call_log (call_id, peer_user_id, direction, kind, outcome, started_at, ended_at)
+         VALUES (?, 'peer1', 'in', ?, 'missed', 1, 2);`,
+        callId,
+        kind,
+      );
+    await insert('c2', 'video');
+    await expect(insert('c3', 'hologram')).rejects.toThrow();
+
+    const again = databaseAt(7);
+    await again.openDatabase();
+    expect((await again.getDatabase().getFirstAsync('SELECT count(*) AS n FROM call_log;')).n).toBe(
+      2,
+    );
+  });
+});

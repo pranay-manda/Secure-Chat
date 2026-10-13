@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { directConversationId, Message } from '../src/models/Message.js';
 import { User } from '../src/models/User.js';
 import {
   bearer,
@@ -171,5 +172,72 @@ describe('POST /contacts/match', () => {
 
     const logs = JSON.stringify(ctx.lines);
     for (const n of [UNREGISTERED, '9800000001', BOB, CAROL]) expect(logs).not.toContain(n);
+  });
+});
+
+describe('GET /contacts/peers', () => {
+  const peers = (userIds, token = alice.tokens.accessToken) =>
+    request(ctx.app)
+      .get('/contacts/peers')
+      .query({ userIds: userIds.join(',') })
+      .set(bearer(token));
+
+  /** A message from `from` to `to` (metadata only, as POST /messages stores it). */
+  const messageFrom = (from, to, clientMessageId = `m-${Math.random()}`) =>
+    Message.create({
+      senderUserId: from.user.id,
+      senderDeviceId: from.device.deviceId,
+      recipientUserId: to.user.id,
+      clientMessageId,
+      conversationId: directConversationId(from.user.id, to.user.id),
+    });
+
+  it('gives the number of someone who has messaged the caller', async () => {
+    await messageFrom(bob, alice);
+
+    const res = await peers([bob.user.id]);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ peers: [{ userId: bob.user.id, phoneNumber: BOB }] });
+  });
+
+  it('never reveals the number of someone the caller only wrote to', async () => {
+    // Bob messages Alice (e.g. a chat started with Alice's user id): Bob does not learn Alice's
+    // number from that. Only a message from Alice to Bob would allow it.
+    await messageFrom(bob, alice);
+
+    const res = await peers([alice.user.id], bob.tokens.accessToken);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ peers: [] });
+  });
+
+  it('leaves out strangers, unknown ids and the caller', async () => {
+    await messageFrom(bob, alice);
+    const unknown = new mongoose.Types.ObjectId().toString();
+
+    const res = await peers([carol.user.id, unknown, alice.user.id, bob.user.id]);
+
+    expect(res.body.peers).toEqual([{ userId: bob.user.id, phoneNumber: BOB }]);
+  });
+
+  it('requires authentication and validates the ids', async () => {
+    expect(
+      (await request(ctx.app).get('/contacts/peers').query({ userIds: bob.user.id })).status,
+    ).toBe(401);
+    expect((await peers(['not-an-id'])).status).toBe(400);
+    expect(
+      (await request(ctx.app).get('/contacts/peers').set(bearer(alice.tokens.accessToken))).status,
+    ).toBe(400);
+    const tooMany = Array.from({ length: LIMITS.CONTACT_PEERS_MAX + 1 }, () =>
+      new mongoose.Types.ObjectId().toString(),
+    );
+    expect((await peers(tooMany)).status).toBe(400);
+  });
+
+  it('logs no phone numbers', async () => {
+    await messageFrom(bob, alice);
+    await peers([bob.user.id]);
+    expect(JSON.stringify(ctx.lines)).not.toContain(BOB);
   });
 });

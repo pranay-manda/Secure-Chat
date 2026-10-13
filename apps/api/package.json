@@ -2,7 +2,7 @@
   "name": "@secure-chat/api",
   "version": "0.1.0",
   "private": true,
-  "description": "Secure Chat backend (Node.js + Express)",
+  "description": "CipherChat backend (Node.js + Express)",
   "type": "module",
   "main": "src/server.js",
   "engines": {
@@ -22,6 +22,7 @@
     "jose": "^6.2.12",
     "libphonenumber-js": "^1.13.14",
     "mongoose": "^8.18.0",
+    "nodemailer": "10.0.11",
     "pino": "^9.9.0",
     "pino-http": "^10.5.0",
     "pusher": "^5.3.4",

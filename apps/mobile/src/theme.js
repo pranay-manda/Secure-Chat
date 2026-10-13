@@ -1,5 +1,5 @@
 /**
- * Secure Chat design system: the only place colours, spacing and type sizes are defined.
+ * CipherChat design system: the only place colours, spacing and type sizes are defined.
  * Screens use these tokens instead of literal values.
  */
 
@@ -19,9 +19,15 @@ export const colors = {
   border: '#d0d7de',
   divider: '#e6e9ec',
   danger: '#cf222e',
+  dangerTint: '#fde8e8',
   read: '#1f6feb',
   notice: '#fff8c5',
   warning: '#9a6700',
+  // Voice call screen (dark, like a phone call).
+  callBackground: '#0d2b22',
+  callControl: '#2c4a40',
+  callMuted: '#b7c9c1',
+  callAccept: '#1f9d55',
 };
 
 /** Avatar backgrounds, picked deterministically from the user id (no random colours). */

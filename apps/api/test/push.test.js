@@ -137,7 +137,7 @@ describe('push notifications for new messages', () => {
     expect(pushes).toEqual([
       {
         to: TOKEN,
-        title: 'Secure Chat',
+        title: 'CipherChat',
         body: 'New message',
         data: { type: 'new_message', messageId: sent.res.body.messageId, hasMessage: true },
         channelId: 'messages',
@@ -226,7 +226,7 @@ describe('push notifications for new messages', () => {
 });
 
 describe('Expo push provider', () => {
-  const message = { to: TOKEN, title: 'Secure Chat', body: 'New message', data: {} };
+  const message = { to: TOKEN, title: 'CipherChat', body: 'New message', data: {} };
 
   it('posts the message to the Expo push API', async () => {
     const fetchImpl = vi.fn(async () => ({

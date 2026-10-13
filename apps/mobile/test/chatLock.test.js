@@ -337,7 +337,7 @@ describe('notifications and locked chats', () => {
         request: {
           identifier: 'n-locked',
           content: {
-            title: 'Secure Chat',
+            title: 'CipherChat',
             body: 'New message',
             data: {
               type: 'new_message',

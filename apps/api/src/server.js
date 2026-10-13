@@ -22,6 +22,7 @@ async function main() {
   }
   const redis = await connectRedis({ url: config.redisUrl, logger });
 
+  const container = createContainer({ config, logger, redis });
   const app = createApp({
     config,
     logger,
@@ -29,8 +30,12 @@ async function main() {
       mongodb: pingMongo,
       redis: () => pingRedis(redis),
     },
-    container: createContainer({ config, logger, redis }),
+    container,
   });
+  if (config.isProduction && config.attachments.driver === 'local') {
+    logger.warn('Attachments are stored on this host (local): run a single API instance only');
+  }
+  container.attachmentService.startSweeper();
 
   const server = app.listen(config.port, config.host, () => {
     logger.info({ host: config.host, port: config.port, env: config.nodeEnv }, 'API listening');
@@ -51,6 +56,7 @@ async function main() {
     }, config.shutdownTimeoutMs);
     forceExit.unref();
 
+    container.attachmentService.stopSweeper();
     try {
       await new Promise((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),

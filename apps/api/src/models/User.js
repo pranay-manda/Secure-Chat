@@ -4,6 +4,11 @@ const userSchema = new mongoose.Schema(
   {
     /** E.164 format, e.g. +919876543210. Normalised before storage. */
     phoneNumber: { type: String, immutable: true },
+    /**
+     * When the phone number was proven by an SMS code (phone sign-in). Null for a number typed
+     * at email sign-up: saved and used for contact discovery, but not verified.
+     */
+    phoneVerifiedAt: { type: Date, default: null },
     /** Lower-cased and trimmed before storage. */
     email: { type: String, immutable: true },
     displayName: { type: String, trim: true, maxlength: 64, default: '' },

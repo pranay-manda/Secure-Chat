@@ -27,10 +27,17 @@ export const LIMITS = Object.freeze({
    * the event carries only { messageId, seq } and the client fetches over HTTPS.
    */
   PUSHER_INLINE_PAYLOAD_BYTES: 8 * 1024,
+  /**
+   * Pusher's limit for one event. The API refuses to relay a call signal that would exceed it
+   * (413) rather than have Pusher drop it silently.
+   */
+  PUSHER_EVENT_MAX_BYTES: 10 * 1024,
   /** Max message ids in one read-receipt or status request. */
   MESSAGE_BATCH_MAX: 100,
   /** Max phone numbers in one contact-discovery request (clients send larger books in batches). */
   CONTACT_MATCH_BATCH_MAX: 500,
+  /** Max user ids in one GET /contacts/peers request (phone numbers of people who wrote to us). */
+  CONTACT_PEERS_MAX: 50,
   /** Max items returned by one page of a cursor-paginated endpoint. */
   PAGE_SIZE_MAX: 100,
   PAGE_SIZE_DEFAULT: 50,
@@ -80,7 +87,71 @@ export const ERROR_CODE = Object.freeze({
   IDENTITY_KEY_CONFLICT: 'IDENTITY_KEY_CONFLICT',
   PREKEY_LIMIT_EXCEEDED: 'PREKEY_LIMIT_EXCEEDED',
   STALE_RECIPIENT_DEVICE: 'STALE_RECIPIENT_DEVICE',
+  PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
+  // Voice calls
+  CALL_NOT_FOUND: 'CALL_NOT_FOUND',
+  CALL_ENDED: 'CALL_ENDED',
+  CALL_INVALID_STATE: 'CALL_INVALID_STATE',
+  CALLEE_BUSY: 'CALLEE_BUSY',
+  CALLEE_UNAVAILABLE: 'CALLEE_UNAVAILABLE',
+  ALREADY_IN_CALL: 'ALREADY_IN_CALL',
+  // Account details (email + phone both required)
+  PHONE_NUMBER_REQUIRED: 'PHONE_NUMBER_REQUIRED',
+  PHONE_NUMBER_TAKEN: 'PHONE_NUMBER_TAKEN',
+  PHONE_NUMBER_MISMATCH: 'PHONE_NUMBER_MISMATCH',
+  EMAIL_TAKEN: 'EMAIL_TAKEN',
+  ALREADY_SET: 'ALREADY_SET',
+  // Attachments (encrypted media)
+  ATTACHMENT_NOT_FOUND: 'ATTACHMENT_NOT_FOUND',
+  ATTACHMENT_INCOMPLETE: 'ATTACHMENT_INCOMPLETE',
 });
+
+/**
+ * Encrypted attachments (photos, videos, voice notes). The phone encrypts each file with its own
+ * random AES-256-GCM key before upload; the server and storage only ever hold the encrypted
+ * blob, and the key travels inside the Signal message.
+ *
+ *   blob = nonce (12 bytes) || AES-256-GCM(key, nonce, padded plaintext) || tag (16 bytes)
+ *
+ * The plaintext is zero-padded to `paddedAttachmentSize(size)` so the server learns only a size
+ * bucket, not the exact file size. The real size is in the Signal message.
+ */
+export const ATTACHMENT = Object.freeze({
+  /** Largest file (plaintext bytes) the app sends. */
+  MAX_BYTES: 100 * 1024 * 1024,
+  KEY_BYTES: 32,
+  NONCE_BYTES: 12,
+  TAG_BYTES: 16,
+  DIGEST_BYTES: 32,
+  /** Nonce + tag around the padded plaintext. */
+  OVERHEAD_BYTES: 12 + 16,
+  /** Every plaintext is padded to at least this many bytes. */
+  MIN_PADDED_BYTES: 1024,
+  /** Lifetime of a signed upload or download URL (checked when the transfer starts). */
+  TRANSFER_URL_TTL_SECONDS: 15 * 60,
+  /** Longest voice note. */
+  VOICE_NOTE_MAX_MS: 15 * 60 * 1000,
+});
+
+/**
+ * Padded plaintext size: 16 buckets per power of two (at most 6.25 % larger), at least
+ * MIN_PADDED_BYTES. Integer-only arithmetic, so every platform computes the same value.
+ */
+export function paddedAttachmentSize(size) {
+  if (!Number.isInteger(size) || size < 0) throw new RangeError('Invalid attachment size');
+  if (size <= ATTACHMENT.MIN_PADDED_BYTES) return ATTACHMENT.MIN_PADDED_BYTES;
+  const exponent = 31 - Math.clz32(size); // floor(log2(size))
+  const step = 2 ** (exponent - 4);
+  return Math.ceil(size / step) * step;
+}
+
+/** Size of the encrypted blob for a plaintext of `size` bytes. */
+export function encryptedAttachmentSize(size) {
+  return paddedAttachmentSize(size) + ATTACHMENT.OVERHEAD_BYTES;
+}
+
+/** Largest encrypted blob the API accepts. */
+export const ATTACHMENT_MAX_ENCRYPTED_BYTES = encryptedAttachmentSize(ATTACHMENT.MAX_BYTES);
 
 /**
  * Signal Protocol parameters (libsignal 0.105). The server only ever handles PUBLIC keys and
@@ -130,6 +201,96 @@ export const REALTIME_EVENT = Object.freeze({
   ENVELOPE: 'envelope',
   /** To the sender's device: `{ receipts: [{ messageId, status, at }] }`. */
   RECEIPT: 'receipt',
+  /** Voice-call signaling to one participant's device: `{ type: CALL_EVENT.*, callId, ... }`. */
+  CALL: 'call',
+  /**
+   * Online status changed, to the devices of people the user has a chat with:
+   * `{ userId, online }` (no time, no device). Sent when the user's app comes online and when it
+   * goes away on purpose; a vanished connection is noticed by polling after the server TTL.
+   */
+  PRESENCE: 'presence',
+  /** Typing indicator to a peer's device: `{ fromUserId, typing }`. */
+  TYPING: 'typing',
+});
+
+/**
+ * Voice calls (1:1). Pusher carries ONLY signaling (who/what/state, SDP, ICE candidates);
+ * audio flows directly between the two phones over WebRTC (DTLS-SRTP), never via the server.
+ * Call media security is WebRTC's, separate from the Signal Protocol used for messages.
+ */
+/**
+ * Online status = "the app on this user's active device recently reached the API", not human
+ * availability. A device sends a heartbeat every HEARTBEAT_INTERVAL_SECONDS while the app is on
+ * screen and online; the server forgets it after TTL_SECONDS without one (two missed beats).
+ */
+export const PRESENCE = Object.freeze({
+  HEARTBEAT_INTERVAL_SECONDS: 20,
+  TTL_SECONDS: 45,
+  /** User ids per presence query. */
+  QUERY_MAX_IDS: 50,
+});
+
+export const CALL_KIND = Object.freeze({ VOICE: 'voice', VIDEO: 'video' });
+export const CALL_KINDS = Object.freeze([CALL_KIND.VOICE, CALL_KIND.VIDEO]);
+
+export const CALL_EVENT = Object.freeze({
+  /** To the callee: `{ callId, callerUserId, kind, createdAt, ringExpiresAt }`. */
+  INVITE: 'invite',
+  /** To the caller: the callee answered; start WebRTC negotiation. */
+  ACCEPTED: 'accepted',
+  /**
+   * To the other participant: `{ kind: 'offer'|'answer'|'candidates'|'media'|'attest', ... }`.
+   * `media` carries `{ video: boolean }`: whether the sender's camera is on (no media itself).
+   * `attest` carries `{ attestation: { type, body }, senderDeviceId }`: the sender's DTLS
+   * fingerprints as Signal ciphertext (opaque to the server).
+   */
+  SIGNAL: 'signal',
+  /** To one or both participants: `{ status, reason }` (terminal). */
+  ENDED: 'ended',
+});
+
+/** Server-side call states. Media states (connecting/connected) exist only on the phones. */
+export const CALL_STATUS = Object.freeze({
+  RINGING: 'ringing',
+  ACCEPTED: 'accepted',
+  REJECTED: 'rejected',
+  CANCELLED: 'cancelled',
+  MISSED: 'missed',
+  ENDED: 'ended',
+  FAILED: 'failed',
+});
+
+export const CALL_TERMINAL_STATUSES = Object.freeze([
+  CALL_STATUS.REJECTED,
+  CALL_STATUS.CANCELLED,
+  CALL_STATUS.MISSED,
+  CALL_STATUS.ENDED,
+  CALL_STATUS.FAILED,
+]);
+
+/** Size limits for signaling relayed through Pusher (whole event must stay under 10 KB). */
+export const CALL_LIMITS = Object.freeze({
+  SDP_MAX_CHARS: 8000,
+  CANDIDATES_PER_REQUEST: 20,
+  CANDIDATE_MAX_CHARS: 512,
+  /**
+   * Remote ICE candidates a phone accepts per ICE generation (one offer/answer exchange: the
+   * first, then each ICE restart) and per call in total; more is a flood and is ignored. A real
+   * exchange brings a handful; per generation, so a long call with many network switches
+   * (each restart brings new candidates) does not run out.
+   */
+  CANDIDATES_PER_GENERATION: 100,
+  CANDIDATES_PER_CALL: 300,
+  /** Highest ICE-restart number an offer may carry (each restart offer is numbered). */
+  ICE_RESTARTS_MAX: 1000,
+  /**
+   * Signal ciphertext of one call-security attestation (decoded bytes). A first-contact
+   * pre-key message measured 2,049 bytes (event 2,848 B); 3,072 leaves room and keeps the
+   * event far under Pusher's limit.
+   */
+  ATTESTATION_MAX_BYTES: 3 * 1024,
+  /** Missed-call notes kept per user until their phone collects them (and ids per ack). */
+  MISSED_MAX: 100,
 });
 
 /**

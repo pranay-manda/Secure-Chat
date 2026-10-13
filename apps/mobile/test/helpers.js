@@ -21,6 +21,10 @@ export function resetDevice() {
   globalThis.__device.secureStore.clear();
   globalThis.__device.sqliteFiles.clear();
   globalThis.__device.sqliteBroken = false;
+  if (globalThis.__device.fsRoot) {
+    require('node:fs').rmSync(globalThis.__device.fsRoot, { recursive: true, force: true });
+    globalThis.__device.fsRoot = undefined;
+  }
 }
 
 /**

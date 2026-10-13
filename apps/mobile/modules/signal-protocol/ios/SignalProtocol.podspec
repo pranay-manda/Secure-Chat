@@ -7,7 +7,7 @@ Pod::Spec.new do |s|
   s.version        = package['version']
   s.summary        = 'Stateless Expo bridge to the official libsignal (LibSignalClient)'
   s.description    = 'Exposes libsignal operations to JS; all state is persisted by JS in SQLCipher/SecureStore.'
-  s.author         = 'Secure Chat'
+  s.author         = 'CipherChat'
   s.homepage       = 'https://github.com/pranay-manda/Secure-Chat'
   s.license        = { :type => 'Proprietary' }
   s.platforms      = { :ios => '15.1' }

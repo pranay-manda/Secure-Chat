@@ -96,6 +96,10 @@ export async function setMeta(key, value) {
   );
 }
 
+export async function deleteMeta(key) {
+  await getDatabase().runAsync('DELETE FROM meta WHERE key = ?;', key);
+}
+
 export function getCipherVersion() {
   return db?.cipherVersion ?? null;
 }

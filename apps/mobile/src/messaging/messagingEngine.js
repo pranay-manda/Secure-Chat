@@ -1,11 +1,23 @@
-import { LIMITS } from '@secure-chat/shared/constants';
+import { LIMITS, PRESENCE } from '@secure-chat/shared/constants';
 import NetInfo from '@react-native-community/netinfo';
 import { AppState } from 'react-native';
 import { create } from 'zustand';
 
 import {
+  handleCallEvent,
+  handleCallNetworkChange,
+  isCallActive,
+  reconcileCall,
+  recoverInterruptedCall,
+  useCallStore,
+} from '../calls/callEngine';
+import { syncMissedCalls } from '../calls/callHistory';
+import { isActivePhase } from '../calls/callMachine';
+import { ENDPOINTS } from '../config/endpoints';
+import {
   acceptIdentityChange,
   deliverOutgoing,
+  enqueueAttachment,
   enqueueText,
   ensureKeysRegistered,
   flushOutbox,
@@ -14,11 +26,22 @@ import {
   syncInbox,
 } from '../crypto/signalService';
 import { apiRequest, NetworkError } from '../lib/api';
+import { applyNetworkState, useConnectivityStore } from '../lib/connectivity';
+import { systemUiGraceMs } from '../lib/systemUi';
+import {
+  cleanUpMediaFiles,
+  downloadPendingAttachments,
+  prepareAttachment,
+  releaseAllPlaintext,
+} from '../media/attachmentService';
+import { handlePresenceEvent, handleTypingEvent } from '../presence/usePresence';
 import * as messages from './messageStore';
 import { connectRealtime } from './realtime';
 
 /** While realtime is not connected, poll the server this often (app in foreground only). */
 const POLL_INTERVAL_MS = 30_000;
+/** Online-status heartbeat (see the API's presenceService): two beats per server TTL. */
+const HEARTBEAT_INTERVAL_MS = PRESENCE.HEARTBEAT_INTERVAL_SECONDS * 1000;
 
 /**
  * UI-facing messaging state. `revision` increases whenever local messages change, so screens
@@ -56,6 +79,7 @@ async function runSync(run) {
     if (!isCurrent(run)) return;
     await syncInbox(userId);
     if (!isCurrent(run)) return;
+    fetchAttachments(run);
     await sendReadReceipts();
     await refreshOutgoingStatuses();
     if (isCurrent(run)) useMessagingStore.setState({ lastSyncError: null });
@@ -105,7 +129,7 @@ async function flushReadReceipts() {
   for (;;) {
     const ids = await messages.listPendingReadReceipts(LIMITS.MESSAGE_BATCH_MAX);
     if (ids.length === 0) return;
-    await apiRequest('POST', '/messages/read', { body: { messageIds: ids } });
+    await apiRequest('POST', ENDPOINTS.MESSAGES.READ, { body: { messageIds: ids } });
     await messages.clearPendingReadReceipts(ids);
     if (ids.length < LIMITS.MESSAGE_BATCH_MAX) return;
   }
@@ -115,7 +139,9 @@ async function flushReadReceipts() {
 async function refreshOutgoingStatuses() {
   const ids = await messages.listUnsettledOutgoing(LIMITS.MESSAGE_BATCH_MAX);
   if (ids.length === 0) return;
-  const { statuses } = await apiRequest('POST', '/messages/status', { body: { messageIds: ids } });
+  const { statuses } = await apiRequest('POST', ENDPOINTS.MESSAGES.STATUS, {
+    body: { messageIds: ids },
+  });
   await messages.applyReceipts(
     statuses
       .filter((s) => s.status !== 'sent')
@@ -129,11 +155,23 @@ function track(run, promise) {
   promise.finally(() => run.tasks.delete(promise));
 }
 
+/** Downloads (encrypted) photos, videos and voice notes that arrived; never blocks a sync. */
+function fetchAttachments(run) {
+  if (!isCurrent(run)) return;
+  track(
+    run,
+    downloadPendingAttachments()
+      .then((done) => done > 0 && isCurrent(run) && bump())
+      .catch(() => {}),
+  );
+}
+
 function onEnvelope(run, payload) {
   if (!isCurrent(run)) return;
   track(
     run,
     handleRealtimeEnvelope(run.userId, payload)
+      .then(() => fetchAttachments(run))
       .catch(() => requestSync()) // decrypted later by the regular sync
       .finally(() => isCurrent(run) && bump()),
   );
@@ -167,6 +205,36 @@ function startPolling(run) {
   run.cleanups.push(() => clearInterval(timer));
 }
 
+/**
+ * "This device is online": sent while the app is on screen (or in a call) and the network is
+ * up. The server forgets it after two missed beats, so a crash, a dead network or a closed app
+ * reads as offline without any further action. Best effort; never blocks anything.
+ */
+function sendHeartbeat(run) {
+  if (!isCurrent(run) || !useMessagingStore.getState().online) return Promise.resolve();
+  // Off screen = background/inactive; an unknown state (just launched) counts as on screen.
+  const appState = AppState.currentState;
+  const offScreen = appState === 'background' || appState === 'inactive';
+  if (offScreen && !isCallActive()) return Promise.resolve();
+  const beat = apiRequest('POST', ENDPOINTS.PRESENCE.HEARTBEAT).catch(() => {});
+  track(run, beat);
+  return beat;
+}
+
+/** The app left the screen: tell the server now rather than waiting for the TTL. */
+function clearPresence(run) {
+  if (!isCurrent(run)) return;
+  track(
+    run,
+    apiRequest('DELETE', ENDPOINTS.PRESENCE.ROOT).catch(() => {}),
+  );
+}
+
+function startHeartbeat(run) {
+  const timer = setInterval(() => sendHeartbeat(run), HEARTBEAT_INTERVAL_MS);
+  run.cleanups.push(() => clearInterval(timer));
+}
+
 async function startRealtime(run) {
   if (run.realtimeActive) return;
   run.realtimeActive = true;
@@ -175,7 +243,18 @@ async function startRealtime(run) {
     const disconnect = await connectRealtime({
       onEnvelope: (payload) => onEnvelope(run, payload),
       onReceipt: (payload) => onReceipt(run, payload),
-      onSubscribed: () => isCurrent(run) && requestSync(),
+      onCall: (payload) => isCurrent(run) && handleCallEvent(payload),
+      onTyping: (payload) => isCurrent(run) && handleTypingEvent(payload),
+      onPresence: (payload) => isCurrent(run) && handlePresenceEvent(payload),
+      onSubscribed: () => {
+        if (!isCurrent(run)) return;
+        requestSync();
+        // Call events published while we were not subscribed are recovered here too, and
+        // calls missed while the app was closed are added to the call history.
+        track(run, reconcileCall());
+        track(run, syncMissedCalls());
+        sendHeartbeat(run); // (re)connected: say so at once
+      },
       onStateChange: (state) => isCurrent(run) && useMessagingStore.setState({ realtime: state }),
     });
     if (isCurrent(run) && run.realtimeActive) run.disconnectRealtime = disconnect;
@@ -203,17 +282,45 @@ function stopRealtime(run) {
   disconnect?.();
 }
 
-/** Background: drop Pusher (push notifications take over). Foreground: reconnect and sync. */
+/** Off screen for real: drop Pusher (push notifications take over) and appear offline. */
+function pauseInBackground(run) {
+  stopRealtime(run);
+  useMessagingStore.setState({ realtime: 'paused' });
+  clearPresence(run);
+}
+
+/**
+ * Background: drop Pusher (push notifications take over), except during a call, whose
+ * signaling (hang-up, reconnection) must keep arriving, and while one of our own system screens
+ * (photo picker, permission dialog) is open: the user has not left the app (lib/systemUi.js).
+ * Foreground: reconnect and sync.
+ */
 export function handleAppStateChange(state) {
   const run = engine;
   if (!run || !isCurrent(run)) return;
+  clearTimeout(run.systemUiTimer);
   if (state === 'background') {
-    stopRealtime(run);
-    useMessagingStore.setState({ realtime: 'paused' });
+    // Decrypted media (open photos, videos, voice notes) never stays behind in the background.
+    releaseAllPlaintext();
+    if (isCallActive()) return; // dropped once the call ends (see startMessaging)
+    const grace = systemUiGraceMs();
+    if (grace > 0) {
+      // Still away when the grace runs out (e.g. went home from the picker): pause then.
+      run.systemUiTimer = setTimeout(() => {
+        if (isCurrent(run) && AppState.currentState === 'background' && !isCallActive()) {
+          pauseInBackground(run);
+        }
+      }, grace);
+      return;
+    }
+    pauseInBackground(run);
   } else if (state === 'active') {
     run.retryRealtime = false;
     startRealtime(run); // no-op if still connected
+    sendHeartbeat(run);
     requestSync();
+    track(run, reconcileCall());
+    track(run, syncMissedCalls());
     // Key maintenance (one-time pre-key top-up, signed/Kyber pre-key rotation) also runs for
     // apps that stay open for days, not only at launch. Best effort; retried next foreground.
     track(
@@ -242,6 +349,7 @@ export function startMessaging(userId) {
     starting: null,
     realtimeActive: false,
     disconnectRealtime: null,
+    systemUiTimer: null,
   };
   engine = run;
   useMessagingStore.setState({ realtime: 'idle', syncing: false, lastSyncError: null });
@@ -249,23 +357,66 @@ export function startMessaging(userId) {
   const appState = AppState.addEventListener('change', handleAppStateChange);
   run.cleanups.push(() => appState.remove());
   run.cleanups.push(() => stopRealtime(run));
+  run.cleanups.push(() => clearTimeout(run.systemUiTimer));
+  // A call that ends while the app is in the background: drop Pusher as usual now.
+  run.cleanups.push(
+    useCallStore.subscribe((state, previous) => {
+      const callJustEnded = !isActivePhase(state.phase) && isActivePhase(previous.phase);
+      if (callJustEnded && AppState.currentState === 'background' && isCurrent(run)) {
+        pauseInBackground(run);
+      }
+    }),
+  );
 
   const unsubscribeNet = NetInfo.addEventListener((net) => {
     if (!isCurrent(run)) return;
-    const online = net.isConnected !== false;
-    const wasOnline = useMessagingStore.getState().online;
+    const change = applyNetworkState(net);
+    // An interface is necessary, not sufficient: lib/connectivity.js adds backend reachability.
+    const online = net.isConnected !== false && net.isInternetReachable !== false;
     useMessagingStore.setState({ online });
-    if (online && !wasOnline) {
+    if (!change.cameOnline && !change.switched) return;
+    // Back online, or Wi-Fi ⇄ mobile data: sockets on the old path may hang, so reconnect
+    // realtime now, catch up over HTTPS, and let a call in progress restart ICE.
+    if (run.retryRealtime) {
+      run.retryRealtime = false;
+      startRealtime(run);
+    } else if (change.switched) {
+      run.disconnectRealtime?.reconnect?.();
+    }
+    requestSync();
+    track(run, reconcileCall());
+    sendHeartbeat(run);
+    handleCallNetworkChange();
+  });
+  run.cleanups.push(unsubscribeNet);
+  // The backend answered again after requests had been failing (whatever the interface said):
+  // catch up now, so a sync that failed during the outage is not left waiting for a poll.
+  run.cleanups.push(
+    useConnectivityStore.subscribe((state, previous) => {
+      const recovered =
+        state.reachableAt > previous.reachableAt && previous.unreachableAt > previous.reachableAt;
+      if (!recovered || !isCurrent(run)) return;
+      requestSync();
+      sendHeartbeat(run);
       if (run.retryRealtime) {
         run.retryRealtime = false;
         startRealtime(run);
       }
-      requestSync();
-    }
-  });
-  run.cleanups.push(unsubscribeNet);
+    }),
+  );
 
   startPolling(run);
+  startHeartbeat(run);
+  // Plaintext media left by a crash or kill, partial downloads and orphaned blobs go now.
+  track(
+    run,
+    cleanUpMediaFiles().catch(() => {}),
+  );
+  // A call this phone was in when the app was last killed goes into the history now.
+  track(
+    run,
+    recoverInterruptedCall().catch(() => {}),
+  );
   run.starting = Promise.all([startRealtime(run), requestSync()]).finally(() => {
     run.starting = null;
   });
@@ -300,6 +451,25 @@ export async function createConversation(peerUserId, title) {
 export async function sendMessage(userId, peerUserId, text) {
   const clientMessageId = await enqueueText(peerUserId, text);
   bump(); // show the `sending` bubble right away
+  try {
+    await deliverOutgoing(userId, clientMessageId);
+  } catch {
+    // Shown as failed in the chat; temporary failures are retried by the next sync.
+  } finally {
+    bump();
+  }
+}
+
+/**
+ * Encrypts and sends a photo, video or voice note (`media`: { uri, contentType, width?, height?,
+ * durationMs?, voiceNote? }) with an optional caption. Throws a MediaError if the file cannot be
+ * sent at all (too large, unsupported, unreadable); after that, failures leave a retryable
+ * `failed` message like text.
+ */
+export async function sendAttachment(userId, peerUserId, media, caption = '') {
+  const prepared = await prepareAttachment(media);
+  const clientMessageId = await enqueueAttachment(peerUserId, prepared, caption);
+  bump();
   try {
     await deliverOutgoing(userId, clientMessageId);
   } catch {

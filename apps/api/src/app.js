@@ -9,11 +9,14 @@ import { HEADERS, LIMITS } from '@secure-chat/shared/constants';
 import { serializeError } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
 import { createAccountRouter } from './modules/account/account.routes.js';
+import { createAttachmentsRouter } from './modules/attachments/attachments.routes.js';
 import { createAuthRouter } from './modules/auth/auth.routes.js';
+import { createCallsRouter } from './modules/calls/calls.routes.js';
 import { createContactsRouter } from './modules/contacts/contacts.routes.js';
 import { createDevicesRouter } from './modules/devices/devices.routes.js';
 import { createKeysRouter } from './modules/keys/keys.routes.js';
 import { createMessagesRouter } from './modules/messages/messages.routes.js';
+import { createPresenceRouter } from './modules/presence/presence.routes.js';
 import { createRealtimeRouter } from './modules/realtime/realtime.routes.js';
 import { createHealthRouter } from './routes/health.js';
 
@@ -95,6 +98,16 @@ export function createApp({ config, logger, healthChecks, container }) {
   app.use('/messages', createMessagesRouter(container));
   app.use('/pusher', createRealtimeRouter(container));
   app.use('/contacts', createContactsRouter(container));
+  app.use('/calls', createCallsRouter(container));
+  app.use('/presence', createPresenceRouter(container));
+  app.use('/attachments', createAttachmentsRouter(container));
+  // Signed-URL transfers of encrypted blobs, when the storage driver serves them itself
+  // (`local`). Authorised by the URL's signature, not a bearer token, like S3 pre-signed URLs.
+  const { attachmentService } = container;
+  const blobRouter = attachmentService.storage.router?.({
+    sizeOf: attachmentService.pendingUploadSize,
+  });
+  if (blobRouter) app.use('/blobs', blobRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

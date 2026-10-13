@@ -249,6 +249,64 @@ describe('naming chats that someone else started', () => {
     expect((await store().getConversation(BOB_ID)).title).toBeNull();
   });
 
+  it('someone who messaged us shows with their number, or their contact name if saved (no upload)', async () => {
+    const { peerLabel } = require('../src/messaging/hooks');
+    // Bob (saved in the address book) and Carol (not saved) messaged first.
+    await store().ensureConversation(BOB_ID);
+    await store().ensureConversation(CAROL_ID);
+    setPhoneBook([{ fullName: 'Bob Kumar', phones: [{ number: '+91 98123 45678' }] }]);
+    const calls = mockApi({
+      [`GET /contacts/peers?userIds=${BOB_ID},${CAROL_ID}`]: () => ({
+        body: {
+          peers: [
+            { userId: BOB_ID, phoneNumber: '+919812345678' },
+            { userId: CAROL_ID, phoneNumber: '+14155550123' },
+          ],
+        },
+      }),
+    });
+
+    expect(await discovery.namePeersFromServer()).toBe(3); // two numbers, one contact name
+
+    const bob = await store().getConversation(BOB_ID);
+    const carol = await store().getConversation(CAROL_ID);
+    expect(peerLabel(BOB_ID, bob.title, bob.peerPhone)).toBe('Bob Kumar');
+    expect(peerLabel(CAROL_ID, carol.title, carol.peerPhone)).toBe('+1 415 555 0123');
+    // Only the user ids went to the server; the address book was read on the phone only.
+    expect(calls.map((c) => c.key)).toEqual([`GET /contacts/peers?userIds=${BOB_ID},${CAROL_ID}`]);
+    expect(contacts().requests).toBe(0); // never prompts
+
+    // Nothing more to ask for now: no further request.
+    expect(await discovery.namePeersFromServer()).toBe(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('without Contacts permission the number is still shown; offline is retried later', async () => {
+    const { peerLabel } = require('../src/messaging/hooks');
+    await store().ensureConversation(BOB_ID);
+    setPhoneBook([], { status: 'denied' });
+    mockApi({}); // every request fails (offline)
+    expect(await discovery.namePeersFromServer()).toBe(0);
+    expect(peerLabel(BOB_ID, null, null)).toBe('User …bbbbbb');
+
+    // Online again, after the retry delay.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 61_000;
+    try {
+      mockApi({
+        [`GET /contacts/peers?userIds=${BOB_ID}`]: () => ({
+          body: { peers: [{ userId: BOB_ID, phoneNumber: '+919812345678' }] },
+        }),
+      });
+      expect(await discovery.namePeersFromServer()).toBe(1);
+    } finally {
+      Date.now = realNow;
+    }
+    const bob = await store().getConversation(BOB_ID);
+    expect(peerLabel(BOB_ID, bob.title, bob.peerPhone)).toBe('+91 98123 45678');
+    expect(contacts().reads).toEqual([]); // no permission: the address book is never read
+  });
+
   it('opening New Chat also names existing unnamed chats', async () => {
     await store().ensureConversation(BOB_ID);
     setPhoneBook([{ fullName: 'Bob Kumar', phones: [{ number: '+919812345678' }] }]);
@@ -288,7 +346,7 @@ describe('New Chat screen', () => {
       tree.root.find((n) => n.props.onPress && n.props.title === label).props.onPress();
     });
 
-  it('shows contacts on Secure Chat and opens the existing chat flow on tap', async () => {
+  it('shows contacts on CipherChat and opens the existing chat flow on tap', async () => {
     const { router } = require('expo-router');
     setPhoneBook([{ fullName: 'Bob Kumar', phones: [{ number: '+919812345678' }] }], {
       status: 'undetermined',
@@ -298,10 +356,10 @@ describe('New Chat screen', () => {
     const tree = await render();
 
     expect(contacts().requests).toBe(1); // asked on entering New Chat
-    expect(texts(tree)).toContain('Contacts on Secure Chat');
+    expect(texts(tree)).toContain('Contacts on CipherChat');
     expect(texts(tree)).toContain('Bob Kumar');
     expect(texts(tree)).toContain('+91 ******5678');
-    expect(texts(tree)).toContain('Search by Secure Chat ID');
+    expect(texts(tree)).toContain('Search by CipherChat ID');
 
     await act(async () => {
       tree.root.find((n) => n.props.testID === `contact-${BOB_ID}`).props.onPress();
@@ -311,28 +369,28 @@ describe('New Chat screen', () => {
     expect(conversation).toMatchObject({ peerUserId: BOB_ID, title: 'Bob Kumar', locked: 0 });
   });
 
-  it('explains a denied permission and offers Try again and the Secure Chat ID fallback', async () => {
+  it('explains a denied permission and offers Try again and the CipherChat ID fallback', async () => {
     const { router } = require('expo-router');
     setPhoneBook([], { status: 'undetermined', grantOnRequest: false });
 
     const tree = await render();
 
     expect(texts(tree)).toContain(
-      'Contacts permission is needed to find people you know on Secure Chat.',
+      'Contacts permission is needed to find people you know on CipherChat.',
     );
-    expect(texts(tree)).toContain('Continue with Secure Chat ID');
-    await press(tree, 'Continue with Secure Chat ID');
+    expect(texts(tree)).toContain('Continue with CipherChat ID');
+    await press(tree, 'Continue with CipherChat ID');
     expect(router.push).toHaveBeenCalledWith('/new-chat-id');
   });
 
-  it('shows an empty state (with the ID fallback) when no contacts use Secure Chat', async () => {
+  it('shows an empty state (with the ID fallback) when no contacts use CipherChat', async () => {
     setPhoneBook([{ fullName: 'Nobody', phones: [{ number: '+919800000001' }] }]);
     registered({});
 
     const tree = await render();
 
-    expect(texts(tree)).toContain('None of your contacts use Secure Chat yet');
-    expect(texts(tree)).toContain('Search by Secure Chat ID');
+    expect(texts(tree)).toContain('None of your contacts use CipherChat yet');
+    expect(texts(tree)).toContain('Search by CipherChat ID');
   });
 
   it('shows a retryable error when the server cannot be reached', async () => {
@@ -353,7 +411,7 @@ describe('New Chat screen', () => {
   });
 });
 
-describe('Secure Chat ID fallback', () => {
+describe('CipherChat ID fallback', () => {
   it('still starts a chat from a typed user ID', async () => {
     const React = require('react');
     const { act, create } = require('react-test-renderer');

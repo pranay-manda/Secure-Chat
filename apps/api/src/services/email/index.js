@@ -1,8 +1,10 @@
-import { createResendClient } from './resend.js';
+import { createSmtpClient } from './smtp.js';
 
 /**
  * Email provider interface: `{ sendOtp(email, otp): Promise<void> }`, mirroring the SMS one.
- * `none` returns null (email sign-in off); env validation refuses `console` in production.
+ * `smtp` sends through an SMTP server (Nodemailer, TLS required); `console` prints codes
+ * (development only; env validation refuses it in production); `none` returns null (email
+ * sign-in off). A failed send always throws, so the OTP flow reports the failure (502).
  */
 
 /** The sign-in email. Contains only the code: no name, account or device details. */
@@ -10,7 +12,7 @@ export function buildOtpEmail({ otp, expiresInMinutes }) {
   const expiry = `This code expires in ${expiresInMinutes} minute${expiresInMinutes === 1 ? '' : 's'}.`;
   const ignore = 'If you did not request this code, you can ignore this email.';
   return {
-    subject: 'Your Secure Chat verification code',
+    subject: 'Your CipherChat verification code',
     text: `Your verification code is: ${otp}\n\n${expiry}\n${ignore}\n`,
     html: [
       '<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#1b1f23">',
@@ -23,13 +25,15 @@ export function buildOtpEmail({ otp, expiresInMinutes }) {
   };
 }
 
-function createResendEmailProvider({ resendApiKey, from, otpTtlSeconds }, { fetchImpl } = {}) {
-  const client = createResendClient({ apiKey: resendApiKey, from, fetchImpl });
+function createSmtpEmailProvider({ smtp, otpTtlSeconds }, { createTransport } = {}) {
+  // One client (and one pooled connection) for the life of the process.
+  const client = createSmtpClient({ ...smtp, createTransport });
   const expiresInMinutes = Math.max(1, Math.round(otpTtlSeconds / 60));
   return {
     async sendOtp(email, otp) {
       await client.send({ to: email, ...buildOtpEmail({ otp, expiresInMinutes }) });
     },
+    close: client.close,
   };
 }
 
@@ -49,12 +53,12 @@ function createConsoleEmailProvider() {
 
 /**
  * @param {ReturnType<typeof import('../../config/env.js').loadEnv>['email']} config
- * @param {{ fetchImpl?: typeof fetch }} [options]
+ * @param {{ createTransport?: Function }} [options] tests pass a fake SMTP transport
  */
 export function createEmailProvider(config, options) {
   switch (config.provider) {
-    case 'resend':
-      return createResendEmailProvider(config, options);
+    case 'smtp':
+      return createSmtpEmailProvider(config, options);
     case 'console':
       return createConsoleEmailProvider();
     case 'none':

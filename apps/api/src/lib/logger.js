@@ -26,8 +26,18 @@ const SENSITIVE_KEYS = [
   'phoneNumber',
   'phoneNumbers',
   'email',
-  'resendApiKey',
+  // SMTP credentials (email OTP delivery).
+  'pass',
+  'smtpPass',
   'pushToken',
+  // Voice-call signaling: session descriptions and ICE candidates (network addresses) and
+  // TURN credentials never go to logs.
+  'sdp',
+  'candidate',
+  'candidates',
+  'credential',
+  'iceServers',
+  'turnSecret',
 ];
 
 /**

@@ -6,7 +6,8 @@ import { HttpError } from './errors.js';
  * Validates request parts with zod schemas and exposes the parsed result as `req.valid`.
  * Unknown body fields are stripped. Error details list field paths and rules, never values.
  *
- * @param {{ body?: import('zod').ZodType, params?: import('zod').ZodType }} schemas
+ * @param {{ body?: import('zod').ZodType, params?: import('zod').ZodType,
+ *           query?: import('zod').ZodType }} schemas
  */
 export function validate(schemas) {
   return (req, res, next) => {

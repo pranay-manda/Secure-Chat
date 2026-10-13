@@ -37,11 +37,20 @@ export function Avatar({ id, name, size = 48 }) {
 }
 
 /** Round icon button for headers and toolbars. */
-export function IconButton({ icon, onPress, label, color = colors.text, disabled, size = 24 }) {
+export function IconButton({
+  icon,
+  onPress,
+  label,
+  color = colors.text,
+  disabled,
+  size = 24,
+  testID,
+}) {
   return (
     <Pressable
       onPress={onPress}
       disabled={disabled}
+      testID={testID}
       hitSlop={8}
       accessibilityRole="button"
       accessibilityLabel={label}

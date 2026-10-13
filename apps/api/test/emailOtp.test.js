@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 import { User } from '../src/models/User.js';
 import { createEmailProvider } from '../src/services/email/index.js';
+import { smtpTransportOptions } from '../src/services/email/smtp.js';
 import {
   bearer,
   buildTestApp,
@@ -15,7 +16,13 @@ import {
 } from './helpers.js';
 
 const EMAIL = 'alice@example.com';
-const RESEND_KEY = 're_testkey_0123456789';
+const SMTP = Object.freeze({
+  host: 'smtp.example.test',
+  port: 587,
+  user: 'otp@example.test',
+  pass: 'smtp-app-password-0123',
+  from: 'CipherChat <otp@example.test>',
+});
 
 let ctx;
 
@@ -30,28 +37,53 @@ beforeEach(async () => {
 const requestOtp = (email = EMAIL, app = ctx.app) =>
   request(app).post('/auth/otp/request').send({ email });
 
-const verifyOtp = (otp, { email = EMAIL, device = newDevice(), app = ctx.app } = {}) =>
-  request(app).post('/auth/otp/verify').send({ email, otp, device });
+/** A valid Indian mobile number derived from the email, so each test address has its own. */
+const phoneFor = (email) => {
+  let hash = 0;
+  for (const ch of email.toLowerCase()) hash = (hash * 31 + ch.charCodeAt(0)) % 1_000_000_000;
+  return `+919${String(hash).padStart(9, '0')}`;
+};
+
+/** Email sign-in: the code from the email plus the account's phone number (saved unverified). */
+const verifyOtp = (
+  otp,
+  { email = EMAIL, device = newDevice(), app = ctx.app, phoneNumber = phoneFor(email) } = {},
+) =>
+  request(app)
+    .post('/auth/otp/verify')
+    .send({ email, otp, device, ...(phoneNumber ? { phoneNumber } : {}) });
 
 const wrongCode = (otp) => (otp === '000000' ? '111111' : '000000');
 
 const otpKeys = async (redis = ctx.redis) =>
   (await redis.keys('otp:*')).filter((key) => !key.startsWith('otp:cd:'));
 
-/** A real Resend provider whose HTTP calls go to a stub instead of the network. */
-function resendProvider(fetchImpl) {
-  return createEmailProvider(
-    {
-      provider: 'resend',
-      resendApiKey: RESEND_KEY,
-      from: 'Secure Chat <otp@example.test>',
-      otpTtlSeconds: 300,
-    },
-    { fetchImpl },
-  );
+/**
+ * A fake SMTP transport for Nodemailer: records the transport options and every message, and
+ * answers like an SMTP server (by default: recipient accepted). Nothing leaves the process.
+ */
+function fakeSmtp(behaviour = async (mail) => ({ accepted: [mail.to], rejected: [] })) {
+  let respond = behaviour;
+  const fake = { options: [], sent: [], behave: (next) => (respond = next) };
+  fake.createTransport = vi.fn((options) => {
+    fake.options.push(options);
+    return {
+      sendMail: async (mail) => {
+        fake.sent.push(mail);
+        return respond(mail);
+      },
+      close: () => {},
+    };
+  });
+  return fake;
 }
 
-const okResponse = () => ({ ok: true, status: 200, json: async () => ({ id: 'email-id' }) });
+/** The real SMTP email provider (smtp.js + the OTP template) on a fake transport. */
+const smtpProvider = (fake, smtp = SMTP) =>
+  createEmailProvider(
+    { provider: 'smtp', smtp, otpTtlSeconds: 300 },
+    { createTransport: fake.createTransport },
+  );
 
 describe('POST /auth/otp/request (email)', () => {
   it('sends a 6-digit OTP by email without returning it', async () => {
@@ -169,81 +201,122 @@ describe('POST /auth/otp/request (email)', () => {
   });
 });
 
-describe('Resend delivery', () => {
-  it('calls the Resend API with the OTP email', async () => {
-    const fetchImpl = vi.fn(async () => okResponse());
-    ctx = buildTestApp({ emailProvider: resendProvider(fetchImpl) });
+describe('SMTP delivery (Nodemailer, mocked: nothing is sent)', () => {
+  it('sends the OTP email over TLS-only SMTP, and the emailed code signs in', async () => {
+    const smtp = fakeSmtp();
+    ctx = buildTestApp({ emailProvider: smtpProvider(smtp) });
 
     await requestOtp().expect(202);
 
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe('https://api.resend.com/emails');
-    expect(init.method).toBe('POST');
-    expect(init.headers.Authorization).toBe(`Bearer ${RESEND_KEY}`);
-    expect(init.signal).toBeInstanceOf(AbortSignal);
-
-    const body = JSON.parse(init.body);
-    expect(body).toMatchObject({
-      from: 'Secure Chat <otp@example.test>',
-      to: [EMAIL],
-      subject: 'Your Secure Chat verification code',
+    // One transporter, configured for verified TLS (STARTTLS required on 587).
+    expect(smtp.createTransport).toHaveBeenCalledTimes(1);
+    expect(smtp.options[0]).toMatchObject({
+      host: SMTP.host,
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: { user: SMTP.user, pass: SMTP.pass },
+      tls: { rejectUnauthorized: true, minVersion: 'TLSv1.2' },
+      pool: true,
+      logger: false,
+      debug: false,
     });
-    const otp = body.text.match(/Your verification code is: (\d{6})/)[1];
-    expect(body.text).toContain('This code expires in 5 minutes.');
-    expect(body.text).toContain('If you did not request this code, you can ignore this email.');
-    expect(body.html).toContain(otp);
+    expect(smtp.options[0].connectionTimeout).toBeGreaterThan(0);
+    expect(smtp.options[0].socketTimeout).toBeGreaterThan(0);
+
+    expect(smtp.sent).toHaveLength(1);
+    const [mail] = smtp.sent;
+    expect(mail).toMatchObject({
+      from: SMTP.from,
+      to: EMAIL,
+      subject: 'Your CipherChat verification code',
+    });
+    const otp = mail.text.match(/Your verification code is: (\d{6})/)[1];
+    expect(mail.text).toContain('This code expires in 5 minutes.');
+    expect(mail.html).toContain(otp);
 
     // The emailed code is the one that signs in.
     await verifyOtp(otp).expect(200);
   });
 
-  it('returns 502, clears the OTP and cooldown, and logs no secrets when Resend rejects', async () => {
-    const fetchImpl = vi.fn(async () => ({
-      ok: false,
-      status: 422,
-      json: async () => ({ name: 'validation_error', message: `Invalid \`to\` field: ${EMAIL}` }),
-    }));
-    ctx = buildTestApp({ emailProvider: resendProvider(fetchImpl) });
+  it('reuses one transporter for every email', async () => {
+    const smtp = fakeSmtp();
+    ctx = buildTestApp({ emailProvider: smtpProvider(smtp) });
+    await requestOtp().expect(202);
+    await requestOtp('bob@example.com').expect(202);
+    expect(smtp.createTransport).toHaveBeenCalledTimes(1);
+    expect(smtp.sent.map((m) => m.to)).toEqual([EMAIL, 'bob@example.com']);
+  });
+
+  it('port 465 uses TLS from the start; any other port must upgrade with STARTTLS', () => {
+    expect(smtpTransportOptions({ ...SMTP, port: 465 })).toMatchObject({
+      secure: true,
+      requireTLS: false,
+      tls: { rejectUnauthorized: true },
+    });
+    for (const port of [587, 25, 2525]) {
+      expect(smtpTransportOptions({ ...SMTP, port })).toMatchObject({
+        secure: false,
+        requireTLS: true,
+        tls: { rejectUnauthorized: true },
+      });
+    }
+  });
+
+  it('a recipient the server does not accept is a failure: 502, code cleared, nothing secret logged', async () => {
+    let otpSent = null;
+    const smtp = fakeSmtp(async (mail) => {
+      otpSent = mail.text.match(/(\d{6})/)[1];
+      return { accepted: [], rejected: [mail.to] };
+    });
+    ctx = buildTestApp({ emailProvider: smtpProvider(smtp) });
+
+    const res = await requestOtp();
+
+    expect(res.status).toBe(502);
+    expect(res.body.error.code).toBe('OTP_DELIVERY_FAILED');
+    expect(await ctx.redis.keys('otp:*')).toEqual([]); // code and cooldown both gone
+    const failure = ctx.lines.find((line) => line.msg === 'OTP delivery failed');
+    expect(failure.err).toMatchObject({ name: 'EmailDeliveryError', code: 'EENVELOPE' });
+    const logs = JSON.stringify(ctx.lines);
+    for (const secret of [SMTP.pass, EMAIL, otpSent]) expect(logs).not.toContain(secret);
+
+    // The user can retry straight away once the server accepts mail again.
+    smtp.behave(async (mail) => ({ accepted: [mail.to], rejected: [] }));
+    await requestOtp().expect(202);
+  });
+
+  it.each([
+    ['authentication failure', { code: 'EAUTH', responseCode: 535 }],
+    ['connection refused', { code: 'ECONNECTION' }],
+    ['timeout', { code: 'ETIMEDOUT' }],
+    ['TLS certificate not trusted', { code: 'ESOCKET' }],
+  ])('%s: 502, never reported as sent, and no secrets in logs', async (_label, fields) => {
+    const smtp = fakeSmtp(async () => {
+      // Real Nodemailer errors can quote the account, the recipient and the server reply.
+      throw Object.assign(
+        new Error(`Failed for ${SMTP.user} / ${EMAIL} pass=${SMTP.pass}`),
+        fields,
+      );
+    });
+    ctx = buildTestApp({ emailProvider: smtpProvider(smtp) });
 
     const res = await requestOtp();
 
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('OTP_DELIVERY_FAILED');
     expect(await ctx.redis.keys('otp:*')).toEqual([]);
-
     const failure = ctx.lines.find((line) => line.msg === 'OTP delivery failed');
-    expect(failure.err).toMatchObject({ status: 422, resendError: 'validation_error' });
-    expect(failure.channel).toBe('email');
+    expect(failure.err).toMatchObject({ name: 'EmailDeliveryError', code: fields.code });
+    if (fields.responseCode) expect(failure.err.responseCode).toBe(fields.responseCode);
     const logs = JSON.stringify(ctx.lines);
-    expect(logs).not.toContain(RESEND_KEY);
-    expect(logs).not.toContain(EMAIL);
-
-    // The user can retry straight away once Resend recovers.
-    fetchImpl.mockImplementation(async () => okResponse());
-    await requestOtp().expect(202);
+    for (const secret of [SMTP.pass, EMAIL, SMTP.user]) expect(logs).not.toContain(secret);
   });
 
-  it('returns 502 when Resend is unreachable or times out', async () => {
-    for (const failure of [
-      Object.assign(new Error(`connect ECONNREFUSED for ${EMAIL}`), { name: 'TypeError' }),
-      Object.assign(new Error('The operation was aborted due to timeout'), {
-        name: 'TimeoutError',
-      }),
-    ]) {
-      ctx = buildTestApp({
-        emailProvider: resendProvider(async () => {
-          throw failure;
-        }),
-      });
-      await ctx.redis.flushall();
-
-      const res = await requestOtp();
-
-      expect(res.status).toBe(502);
-      expect(res.body.error.code).toBe('OTP_DELIVERY_FAILED');
-      expect(JSON.stringify(ctx.lines)).not.toContain(EMAIL);
-    }
+  it('accepts the recipient case-insensitively (servers may echo it normalised)', async () => {
+    const smtp = fakeSmtp(async (mail) => ({ accepted: [mail.to.toUpperCase()], rejected: [] }));
+    ctx = buildTestApp({ emailProvider: smtpProvider(smtp) });
+    await requestOtp().expect(202);
   });
 });
 
@@ -285,15 +358,19 @@ describe('Redis failure', () => {
 });
 
 describe('POST /auth/otp/verify (email)', () => {
-  it('signs in with the correct OTP and creates an email-only user', async () => {
+  it('signs in with the correct OTP and creates a user with the email and phone number', async () => {
     await requestOtp().expect(202);
     const device = newDevice();
 
     const res = await verifyOtp(ctx.email.lastOtp(EMAIL), { device });
 
     expect(res.status).toBe(200);
-    expect(res.body.user).toMatchObject({ email: EMAIL, isNew: true });
-    expect(res.body.user.phoneNumber).toBeUndefined();
+    expect(res.body.user).toMatchObject({
+      email: EMAIL,
+      phoneNumber: phoneFor(EMAIL),
+      phoneVerifiedAt: null, // typed, not proven by an SMS code
+      isNew: true,
+    });
     expect(res.body.device.deviceId).toBe(device.deviceId);
     expect(res.body.tokens.accessToken.split('.')).toHaveLength(3);
     expect(res.body.tokens.refreshToken).toMatch(/^[a-f\d]{24}\.[A-Za-z0-9_-]{43}$/);
@@ -311,14 +388,17 @@ describe('POST /auth/otp/verify (email)', () => {
 
     await clearCooldowns(ctx.redis);
     await requestOtp('ALICE@Example.com').expect(202);
-    const second = await verifyOtp(ctx.email.lastOtp(EMAIL), { email: ' Alice@EXAMPLE.com' });
+    const second = await verifyOtp(ctx.email.lastOtp(EMAIL), {
+      email: ' Alice@EXAMPLE.com',
+      phoneNumber: phoneFor(EMAIL),
+    });
 
     expect(second.status).toBe(200);
     expect(second.body.user).toMatchObject({ id: first.body.user.id, isNew: false });
     expect(await User.countDocuments({ email: EMAIL })).toBe(1);
   });
 
-  it('keeps separate email-only and phone-only users side by side', async () => {
+  it('keeps email and phone sign-in accounts side by side', async () => {
     await requestOtp().expect(202);
     await verifyOtp(ctx.email.lastOtp(EMAIL)).expect(200);
     await requestOtp('bob@example.com').expect(202);
@@ -356,6 +436,34 @@ describe('POST /auth/otp/verify (email)', () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('OTP_INVALID');
     expect(await ctx.redis.exists(otpKey)).toBe(0);
+  });
+
+  it('creates (activates) an account only after a correct code is verified', async () => {
+    await requestOtp().expect(202);
+    expect(await User.countDocuments()).toBe(0); // requesting a code creates nothing
+    const otp = ctx.email.lastOtp(EMAIL);
+    await verifyOtp(wrongCode(otp)).expect(400);
+    expect(await User.countDocuments()).toBe(0); // a wrong code creates nothing
+
+    await verifyOtp(otp).expect(200);
+    expect(await User.countDocuments()).toBe(1);
+  });
+
+  it('an expired or exhausted code never creates an account', async () => {
+    await requestOtp().expect(202);
+    const otp = ctx.email.lastOtp(EMAIL);
+    for (let i = 0; i < 5; i += 1) await verifyOtp(wrongCode(otp));
+    await verifyOtp(otp).expect(400);
+    expect(await User.countDocuments()).toBe(0);
+  });
+
+  it('concurrent submissions of the same correct code sign in exactly once', async () => {
+    await requestOtp().expect(202);
+    const otp = ctx.email.lastOtp(EMAIL);
+    const results = await Promise.all(Array.from({ length: 4 }, () => verifyOtp(otp)));
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.status !== 200).every((r) => r.status === 400)).toBe(true);
+    expect(await User.countDocuments()).toBe(1);
   });
 
   it('accepts an OTP only once', async () => {
@@ -421,6 +529,154 @@ describe('POST /auth/otp/verify (email)', () => {
     expect(logs).not.toContain(otp);
     expect(logs).not.toContain(EMAIL);
     expect(logs).not.toContain('alice');
+  });
+});
+
+describe('email + phone number at sign-up (OTP to the email)', () => {
+  const fresh = async (email = EMAIL) => {
+    await clearCooldowns(ctx.redis);
+    await requestOtp(email).expect(202);
+    return ctx.email.lastOtp(email);
+  };
+
+  it('a new account needs a phone number; nothing is created without one', async () => {
+    const res = await verifyOtp(await fresh(), { phoneNumber: null });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('PHONE_NUMBER_REQUIRED');
+    expect(await User.countDocuments()).toBe(0);
+    const bad = await verifyOtp(await fresh(), { phoneNumber: '12345' });
+    expect(bad.status).toBe(400); // not a valid number: refused before the code is used
+  });
+
+  it('saves the number normalised to E.164, so contact discovery can find the user', async () => {
+    const res = await verifyOtp(await fresh(), { phoneNumber: '+91 98123 45678' });
+    expect(res.status).toBe(200);
+    expect(res.body.user.phoneNumber).toBe('+919812345678');
+    const user = await User.findOne({ email: EMAIL }).lean();
+    expect(user.phoneNumber).toBe('+919812345678');
+  });
+
+  it('a number already used by another account is refused, and no account is created', async () => {
+    await verifyOtp(await fresh(), { phoneNumber: '+919812345678' }).expect(200);
+    const res = await verifyOtp(await fresh('bob@example.com'), {
+      email: 'bob@example.com',
+      phoneNumber: '+919812345678',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('PHONE_NUMBER_TAKEN');
+    expect(await User.countDocuments()).toBe(1);
+  });
+
+  it('an existing account without a number gets this one; a different number is refused', async () => {
+    await User.create({ email: EMAIL }); // an account from before numbers were required
+    await verifyOtp(await fresh(), { phoneNumber: '+919812345678' }).expect(200);
+    expect((await User.findOne({ email: EMAIL }).lean()).phoneNumber).toBe('+919812345678');
+
+    await verifyOtp(await fresh(), { phoneNumber: '+919812345678' }).expect(200); // same: fine
+    const other = await verifyOtp(await fresh(), { phoneNumber: '+919800000000' });
+    expect(other.status).toBe(409);
+    expect(other.body.error.code).toBe('PHONE_NUMBER_MISMATCH');
+    expect((await User.findOne({ email: EMAIL }).lean()).phoneNumber).toBe('+919812345678');
+  });
+
+  it('the number is never checked before the code is: a wrong code reveals nothing', async () => {
+    await verifyOtp(await fresh(), { phoneNumber: '+919812345678' }).expect(200);
+    const otp = await fresh('bob@example.com');
+    const wrong = otp === '000000' ? '111111' : '000000';
+    const res = await verifyOtp(wrong, { email: 'bob@example.com', phoneNumber: '+919812345678' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('OTP_INVALID'); // not PHONE_NUMBER_TAKEN
+  });
+
+  it('phone sign-in marks the number as verified', async () => {
+    await request(ctx.app).post('/auth/otp/request').send({ phoneNumber: '+919876543210' });
+    const res = await request(ctx.app)
+      .post('/auth/otp/verify')
+      .send({
+        phoneNumber: '+919876543210',
+        otp: ctx.sms.lastOtp('+919876543210'),
+        device: newDevice(),
+      })
+      .expect(200);
+    expect(res.body.user.phoneVerifiedAt).toEqual(expect.any(String));
+  });
+});
+
+describe('adding a missing email or phone number to an account', () => {
+  async function phoneUser(phoneNumber = '+919876543210') {
+    await clearCooldowns(ctx.redis);
+    await request(ctx.app).post('/auth/otp/request').send({ phoneNumber });
+    const res = await request(ctx.app)
+      .post('/auth/otp/verify')
+      .send({ phoneNumber, otp: ctx.sms.lastOtp(phoneNumber), device: newDevice() })
+      .expect(200);
+    return { id: res.body.user.id, token: res.body.tokens.accessToken };
+  }
+  const as = (user) => ({
+    get: (p) => request(ctx.app).get(p).set(bearer(user.token)),
+    post: (p, body) => request(ctx.app).post(p).set(bearer(user.token)).send(body),
+  });
+
+  it('a phone sign-in account adds its email with a code sent to that email', async () => {
+    const user = await phoneUser();
+    expect((await as(user).get('/account')).body.user.email).toBeUndefined();
+    await as(user).post('/account/email/otp', { email: 'Alice@Example.com' }).expect(202);
+    const otp = ctx.email.lastOtp(EMAIL);
+    const res = await as(user).post('/account/email', { email: EMAIL, otp });
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({ email: EMAIL, phoneNumber: '+919876543210' });
+    // Now the same account signs in by email too.
+    await clearCooldowns(ctx.redis);
+    await requestOtp().expect(202);
+    const login = await verifyOtp(ctx.email.lastOtp(EMAIL), { phoneNumber: '+919876543210' });
+    expect(login.body.user.id).toBe(user.id);
+  });
+
+  it('a code for adding an email cannot sign in, and a sign-in code cannot add an email', async () => {
+    const user = await phoneUser();
+    await as(user).post('/account/email/otp', { email: EMAIL }).expect(202);
+    const linkCode = ctx.email.lastOtp(EMAIL);
+    expect((await verifyOtp(linkCode)).status).toBe(400); // not a sign-in code
+    expect(await User.countDocuments({ email: EMAIL })).toBe(0);
+
+    await clearCooldowns(ctx.redis);
+    await requestOtp().expect(202);
+    const signInCode = ctx.email.lastOtp(EMAIL);
+    const res = await as(user).post('/account/email', { email: EMAIL, otp: signInCode });
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses an email used by another account, and never replaces a set email or number', async () => {
+    await clearCooldowns(ctx.redis);
+    await requestOtp().expect(202);
+    const emailUser = await verifyOtp(ctx.email.lastOtp(EMAIL), { phoneNumber: '+919812345678' });
+    const user = await phoneUser();
+    const taken = await as(user).post('/account/email/otp', { email: EMAIL });
+    expect(taken.status).toBe(409);
+    expect(taken.body.error.code).toBe('EMAIL_TAKEN');
+
+    const owner = { token: emailUser.body.tokens.accessToken };
+    const again = await as(owner).post('/account/phone', { phoneNumber: '+919800000000' });
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('ALREADY_SET');
+    const email = await as(owner).post('/account/email/otp', { email: 'new@example.com' });
+    expect(email.status).toBe(409);
+  });
+
+  it('an account without a number adds one; a taken number is refused', async () => {
+    const legacy = await User.create({ email: EMAIL });
+    await clearCooldowns(ctx.redis);
+    await requestOtp().expect(202);
+    // Sign in by email without a number (an older app version): allowed for an existing account.
+    const login = await verifyOtp(ctx.email.lastOtp(EMAIL), { phoneNumber: null }).expect(200);
+    const user = { token: login.body.tokens.accessToken };
+    await phoneUser('+919811111111');
+    const taken = await as(user).post('/account/phone', { phoneNumber: '+919811111111' });
+    expect(taken.status).toBe(409);
+    expect(taken.body.error.code).toBe('PHONE_NUMBER_TAKEN');
+    const ok = await as(user).post('/account/phone', { phoneNumber: '+91 98222 22222' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.user).toMatchObject({ id: String(legacy._id), phoneNumber: '+919822222222' });
   });
 });
 

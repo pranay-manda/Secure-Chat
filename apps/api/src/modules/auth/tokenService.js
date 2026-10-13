@@ -6,6 +6,8 @@ import { generateToken, sha256 } from '../../lib/crypto.js';
 
 const ALGORITHM = 'HS256';
 const REFRESH_TOKEN_PATTERN = /^([a-f\d]{24})\.([A-Za-z0-9_-]{43})$/;
+/** A refresh-token secret: 32 random bytes, base64url (as generateToken(32) produces). */
+export const REFRESH_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * Access tokens: short-lived HS256 JWTs (sub = userId, sid = sessionId, did = deviceId).
@@ -44,8 +46,12 @@ export function createTokenService(config) {
     return { userId: payload.sub, sessionId: payload.sid, deviceId: payload.did };
   }
 
-  function createRefreshToken(sessionId) {
-    const secret = generateToken(32);
+  /**
+   * A new refresh token for `sessionId`. The secret is generated here, or is the one the client
+   * proposed for this rotation (so the client knows its next token even if the response never
+   * arrives; see authService.refresh).
+   */
+  function createRefreshToken(sessionId, { secret = generateToken(32) } = {}) {
     return {
       refreshToken: `${sessionId}.${secret}`,
       refreshTokenHash: sha256(secret),

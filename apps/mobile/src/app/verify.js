@@ -24,7 +24,11 @@ function useCountdown(initialSeconds) {
 export default function VerifyScreen() {
   const params = useLocalSearchParams();
   const email = params.email ? String(params.email) : null;
-  const identifier = email ? { email } : { phoneNumber: String(params.phoneNumber ?? '') };
+  const phoneNumber = params.phoneNumber ? String(params.phoneNumber) : null;
+  // The code is requested for (and resent to) the email or the phone; with email sign-in the
+  // phone number goes along with the code, to be saved with the account.
+  const identifier = email ? { email } : { phoneNumber };
+  const credentials = email ? { email, ...(phoneNumber ? { phoneNumber } : {}) } : identifier;
   const verifyOtp = useAuthStore((state) => state.verifyOtp);
   const requestOtp = useAuthStore((state) => state.requestOtp);
 
@@ -39,7 +43,7 @@ export default function VerifyScreen() {
     setLoading(true);
     try {
       // On success the root layout's guard switches to the signed-in screens.
-      await verifyOtp(identifier, code);
+      await verifyOtp(credentials, code);
     } catch (err) {
       setError(authErrorMessage(err));
       setOtp('');

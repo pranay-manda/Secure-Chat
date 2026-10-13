@@ -22,7 +22,7 @@ function toPublicDevice(device, currentDeviceId) {
   };
 }
 
-export function createDeviceService({ logger }) {
+export function createDeviceService({ logger, callService, presenceService }) {
   /** Updates metadata of the caller's own device (keys and push tokens join in later phases). */
   async function registerCurrentDevice(auth, details) {
     const device = await Device.findOneAndUpdate(
@@ -70,6 +70,9 @@ export function createDeviceService({ logger }) {
       // Unused one-time pre-keys of a revoked device must never be handed out.
       await OneTimePreKey.deleteMany({ deviceId }, { session });
     });
+    // A call on the revoked device cannot continue.
+    await callService?.endCallsForUser(auth.userId, 'device_revoked', { deviceId });
+    await presenceService?.clear(auth.userId, { deviceId });
     logger.info({ userId: auth.userId, self: deviceId === auth.deviceId }, 'Device revoked');
   }
 

@@ -16,6 +16,14 @@ const STATUS_ICON = {
   failed: { name: 'alert-circle', color: colors.danger },
 };
 
+/** Chat-list label of a photo, video or voice note (its caption, if any, follows it). */
+const ATTACHMENT_PREVIEW = {
+  image: { icon: 'image-outline', label: 'Photo' },
+  video: { icon: 'videocam-outline', label: 'Video' },
+  audio: { icon: 'musical-note-outline', label: 'Audio' },
+  voice: { icon: 'mic-outline', label: 'Voice message' },
+};
+
 function Preview({ item }) {
   if (item.lastStatus === 'undecryptable') {
     return <Text style={styles.previewMuted}>🔒 Message could not be decrypted</Text>;
@@ -23,13 +31,20 @@ function Preview({ item }) {
   if (item.lastStatus === 'identity_pending') {
     return <Text style={styles.previewMuted}>🛡 Security code changed</Text>;
   }
+  if (item.lastStatus === 'unsupported') {
+    return <Text style={styles.previewMuted}>Message can’t be shown</Text>;
+  }
   if (item.lastBody == null) return <Text style={styles.previewMuted}>No messages yet</Text>;
   const status = item.lastDirection === 'out' ? STATUS_ICON[item.lastStatus] : null;
+  const media = item.lastAttachmentKind
+    ? ATTACHMENT_PREVIEW[item.lastVoiceNote === 1 ? 'voice' : item.lastAttachmentKind]
+    : null;
   return (
     <View style={styles.previewRow}>
       {status ? <Ionicons name={status.name} size={16} color={status.color} /> : null}
+      {media ? <Ionicons name={media.icon} size={16} color={colors.muted} /> : null}
       <Text style={[styles.preview, item.unread > 0 && styles.previewUnread]} numberOfLines={1}>
-        {item.lastBody}
+        {media ? item.lastBody || media.label : item.lastBody}
       </Text>
     </View>
   );
@@ -45,7 +60,7 @@ export function showChatOptions(item, { locked }) {
     if (message) Alert.alert('Chat Lock', message);
     else if (result.ok) bumpRevision();
   };
-  Alert.alert(peerLabel(item.peerUserId, item.title), undefined, [
+  Alert.alert(peerLabel(item.peerUserId, item.title, item.peerPhone), undefined, [
     { text: 'Cancel', style: 'cancel' },
     { text: locked ? 'Unlock chat' : 'Lock chat', onPress: run },
   ]);
@@ -53,7 +68,7 @@ export function showChatOptions(item, { locked }) {
 
 /** One conversation in a chat list. Only rendered for chats the user may currently see. */
 export function ChatListRow({ item, locked = false }) {
-  const name = peerLabel(item.peerUserId, item.title);
+  const name = peerLabel(item.peerUserId, item.title, item.peerPhone);
   const unread = item.unread > 0;
   return (
     <Pressable

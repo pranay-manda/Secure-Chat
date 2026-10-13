@@ -1,0 +1,8 @@
+{
+  "name": "call-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Expo module: Android microphone foreground service that keeps a voice call's microphone working in the background",
+  "main": "index.js",
+  "license": "AGPL-3.0-only"
+}

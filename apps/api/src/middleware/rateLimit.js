@@ -19,6 +19,16 @@ export const RATE_LIMITS = Object.freeze({
    * enumerate the phone-number space by spreading probes over many small requests.
    */
   contactMatchNumbersPerUser: { points: 5000, duration: 60 * 60 },
+  /** Starting calls (each one rings someone and may send a push): stop ring-spam. */
+  callStartPerUser: { points: 10, duration: 60 },
+  /** Adding a missing email or phone number to an account (and its email codes). */
+  accountDetailsPerUser: { points: 20, duration: 60 * 60 },
+  /** New attachment uploads (photos, videos, voice notes). */
+  attachmentCreatePerUser: { points: 30, duration: 60 },
+  /** Storage budget for new uploads, in MiB of encrypted data. */
+  attachmentMegabytesPerUser: { points: 2048, duration: 60 * 60 },
+  /** One beat every 20 s plus foreground/reconnect beats; more is a loop. */
+  presenceHeartbeatPerUser: { points: 12, duration: 60 },
 });
 
 /**

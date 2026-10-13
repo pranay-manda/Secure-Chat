@@ -119,6 +119,80 @@ describe('API URL of preview/production builds', () => {
   });
 });
 
+describe('voice and video calls build configuration', () => {
+  it('asks for the microphone and the camera, and states why honestly', () => {
+    const webrtc = appJson.expo.plugins.find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === '@config-plugins/react-native-webrtc',
+    );
+    expect(webrtc[1].microphonePermission).toMatch(/voice and video calls/i);
+    expect(webrtc[1].cameraPermission).toMatch(/camera for video calls/i);
+    const blocked = appJson.expo.android.blockedPermissions;
+    expect(blocked).not.toContain('android.permission.CAMERA');
+    expect(blocked).not.toContain('android.permission.RECORD_AUDIO');
+    expect(blocked).not.toContain('android.permission.MODIFY_AUDIO_SETTINGS');
+    // iOS keeps a call's audio session alive when the screen locks or the app is switched.
+    expect(appJson.expo.ios.infoPlist.UIBackgroundModes).toContain('audio');
+  });
+
+  it('declares the camera as optional hardware (the app works without one)', () => {
+    const { markCameraOptional } = require('../plugins/withVoiceCallsAndroid');
+    const manifest = { manifest: { $: {}, application: [{ $: {} }] } };
+    const features = markCameraOptional(manifest).manifest['uses-feature'];
+    expect(features).toEqual([
+      { $: { 'android:name': 'android.hardware.camera', 'android:required': 'false' } },
+    ]);
+    // Idempotent, and corrects a required=true left by another plugin.
+    features[0].$['android:required'] = 'true';
+    expect(markCameraOptional(manifest).manifest['uses-feature']).toHaveLength(1);
+    expect(features[0].$['android:required']).toBe('false');
+  });
+
+  it('removes the unused WebRTC screen-sharing service declaration from the manifest', () => {
+    const { removeScreenShareService } = require('../plugins/withVoiceCallsAndroid');
+    expect(appJson.expo.plugins).toContain('./plugins/withVoiceCallsAndroid');
+    const manifest = {
+      manifest: {
+        $: { 'xmlns:android': 'http://schemas.android.com/apk/res/android' },
+        application: [{ $: { 'android:name': '.MainApplication' }, service: [] }],
+      },
+    };
+    const result = removeScreenShareService(manifest);
+    expect(result.manifest.$['xmlns:tools']).toBe('http://schemas.android.com/tools');
+    expect(result.manifest.application[0].service).toEqual([
+      {
+        $: {
+          'android:name': 'com.oney.WebRTCModule.MediaProjectionService',
+          'tools:node': 'remove',
+        },
+      },
+    ]);
+    // Idempotent across prebuild runs.
+    expect(removeScreenShareService(result).manifest.application[0].service).toHaveLength(1);
+  });
+
+  it('declares only a private "microphone" foreground service for calls in the background', () => {
+    const moduleDir = path.join(root, 'modules', 'call-service');
+    const manifest = readFileSync(
+      path.join(moduleDir, 'android', 'src', 'main', 'AndroidManifest.xml'),
+      'utf8',
+    );
+    const services = manifest.match(/<service[\s\S]*?\/>/g);
+    expect(services).toHaveLength(1);
+    expect(services[0]).toContain('android:name="expo.modules.callservice.CallForegroundService"');
+    expect(services[0]).toContain('android:foregroundServiceType="microphone"');
+    expect(services[0]).toContain('android:exported="false"');
+    expect(manifest).toContain('android.permission.FOREGROUND_SERVICE_MICROPHONE');
+    const blocked = appJson.expo.android.blockedPermissions;
+    expect(blocked).not.toContain('android.permission.FOREGROUND_SERVICE');
+    expect(blocked).not.toContain('android.permission.FOREGROUND_SERVICE_MICROPHONE');
+    // Android only: iOS uses the "audio" background mode.
+    const config = JSON.parse(
+      readFileSync(path.join(moduleDir, 'expo-module.config.json'), 'utf8'),
+    );
+    expect(config.platforms).toEqual(['android']);
+  });
+});
+
 describe('Android permissions', () => {
   it('blocks permissions the app does not use, keeps the ones it needs', () => {
     const blocked = appJson.expo.android.blockedPermissions;
@@ -127,11 +201,36 @@ describe('Android permissions', () => {
       'android.permission.READ_EXTERNAL_STORAGE',
       'android.permission.WRITE_EXTERNAL_STORAGE',
       'android.permission.WRITE_CONTACTS',
+      // Added by expo-screen-capture for screenshot *detection* (Android 13), which the app does
+      // not use: it only sets FLAG_SECURE, which needs no permission. A declared photo
+      // permission would also need a Google Play declaration.
+      'android.permission.READ_MEDIA_IMAGES',
     ]) {
       expect(blocked).toContain(permission);
     }
-    for (const needed of ['READ_CONTACTS', 'USE_BIOMETRIC', 'USE_FINGERPRINT', 'INTERNET']) {
+    for (const needed of [
+      'READ_CONTACTS',
+      'USE_BIOMETRIC',
+      'USE_FINGERPRINT',
+      'INTERNET',
+      'RECORD_AUDIO',
+      'POST_NOTIFICATIONS',
+    ]) {
       expect(blocked).not.toContain(`android.permission.${needed}`);
     }
+  });
+
+  it('uses expo-screen-capture only to block capture, never its screenshot listener', () => {
+    const { readdirSync, statSync } = require('node:fs');
+    const files = (dir) =>
+      readdirSync(dir).flatMap((name) => {
+        const full = path.join(dir, name);
+        return statSync(full).isDirectory() ? files(full) : full.endsWith('.js') ? [full] : [];
+      });
+    // addScreenshotListener / useScreenshotListener need the media permission; FLAG_SECURE not.
+    const usesListener = files(path.join(root, 'src')).filter((file) =>
+      /ScreenshotListener/.test(readFileSync(file, 'utf8')),
+    );
+    expect(usesListener).toEqual([]); // so READ_MEDIA_IMAGES can stay blocked
   });
 });

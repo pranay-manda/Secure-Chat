@@ -3,6 +3,7 @@ import * as Notifications from 'expo-notifications';
 import { AppState, Platform } from 'react-native';
 import { create } from 'zustand';
 
+import { ENDPOINTS } from '../config/endpoints';
 import { apiRequest } from '../lib/api';
 import { deleteSecureItem, getSecureJson, SECURE_KEYS, setSecureJson } from '../lib/secureStorage';
 
@@ -16,6 +17,8 @@ import { deleteSecureItem, getSecureJson, SECURE_KEYS, setSecureJson } from '../
  */
 
 export const MESSAGES_CHANNEL_ID = 'messages';
+/** Incoming voice calls: highest importance so a ringing call is not silently collapsed. */
+export const CALLS_CHANNEL_ID = 'calls';
 /** Re-register a known token at least this often (server may have dropped it). */
 const REREGISTER_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -43,6 +46,13 @@ async function ensureAndroidChannel() {
     importance: Notifications.AndroidImportance.HIGH,
     lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
     showBadge: true,
+  });
+  await Notifications.setNotificationChannelAsync(CALLS_CHANNEL_ID, {
+    name: 'Calls',
+    importance: Notifications.AndroidImportance.MAX,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
+    vibrationPattern: [0, 500, 500, 500],
+    showBadge: false,
   });
 }
 
@@ -90,7 +100,7 @@ async function register({ force = false } = {}) {
     const fresh =
       stored?.token === token && Date.now() - (stored.registeredAt ?? 0) < REREGISTER_AFTER_MS;
     if (force || !fresh) {
-      await apiRequest('POST', '/devices/push-token', { body: { token } });
+      await apiRequest('POST', ENDPOINTS.DEVICES.PUSH_TOKEN, { body: { token } });
       await setSecureJson(SECURE_KEYS.PUSH_REGISTRATION, { token, registeredAt: Date.now() });
     }
     usePushStore.setState({ status: 'granted', error: null });
@@ -138,4 +148,23 @@ export async function unregisterPushNotifications() {
 export function messageIdFromNotification(notification) {
   const data = notification?.request?.content?.data;
   return data?.type === 'new_message' && typeof data.messageId === 'string' ? data.messageId : null;
+}
+
+/** The call id of an "Incoming voice call" notification, if it is one. */
+export function callIdFromNotification(notification) {
+  const data = notification?.request?.content?.data;
+  return data?.type === 'incoming_call' && typeof data.callId === 'string' ? data.callId : null;
+}
+
+/** Removes the "Incoming voice call" notification of a call that is over. Best effort. */
+export async function dismissCallNotifications(callId) {
+  try {
+    for (const notification of await Notifications.getPresentedNotificationsAsync()) {
+      if (callIdFromNotification(notification) === callId) {
+        await Notifications.dismissNotificationAsync(notification.request.identifier);
+      }
+    }
+  } catch {
+    // Nothing to dismiss, or not supported on this build.
+  }
 }

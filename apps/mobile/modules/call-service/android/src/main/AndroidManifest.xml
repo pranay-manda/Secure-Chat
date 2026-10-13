@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!-- A voice call keeps the microphone while the app is in the background (Android 11+ silences
+       it otherwise). FOREGROUND_SERVICE_MICROPHONE is required from Android 14. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+  <application>
+    <service
+      android:name="expo.modules.callservice.CallForegroundService"
+      android:exported="false"
+      android:foregroundServiceType="microphone" />
+  </application>
+</manifest>

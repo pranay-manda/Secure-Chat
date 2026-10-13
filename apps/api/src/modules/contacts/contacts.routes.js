@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { LIMITS } from '@secure-chat/shared/constants';
+import { objectIdSchema } from '@secure-chat/shared/validation';
 import { z } from 'zod';
 
 import { validate } from '../../middleware/validate.js';
@@ -12,7 +13,18 @@ const matchBody = z.strictObject({
     .max(LIMITS.CONTACT_MATCH_BATCH_MAX),
 });
 
-/** Contact discovery. Authenticated, batch-limited and rate-limited per number checked. */
+const peersQuery = z.strictObject({
+  userIds: z
+    .string()
+    .min(1)
+    .transform((value) => value.split(',').filter(Boolean))
+    .pipe(z.array(objectIdSchema).min(1).max(LIMITS.CONTACT_PEERS_MAX)),
+});
+
+/**
+ *   POST /contacts/match            contact discovery (batch-limited, rate-limited per number)
+ *   GET  /contacts/peers?userIds=   phone numbers of people who have messaged the caller
+ */
 export function createContactsRouter({ contactService, rateLimiters, authenticate }) {
   const router = Router();
 
@@ -22,6 +34,12 @@ export function createContactsRouter({ contactService, rateLimiters, authenticat
     const { phoneNumbers } = req.valid.body;
     await rateLimiters.consume('contactMatchNumbersPerUser', req.auth.userId, phoneNumbers.length);
     res.status(200).json({ matches: await contactService.match(req.auth, phoneNumbers) });
+  });
+
+  router.get('/peers', validate({ query: peersQuery }), async (req, res) => {
+    res
+      .status(200)
+      .json({ peers: await contactService.peerNumbers(req.auth, req.valid.query.userIds) });
   });
 
   return router;

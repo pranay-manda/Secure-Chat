@@ -12,7 +12,7 @@ import { Session } from '../../models/Session.js';
 export function buildPushMessage(token, envelope) {
   return {
     to: token,
-    title: 'Secure Chat',
+    title: 'CipherChat',
     body: 'New message',
     data: { type: 'new_message', messageId: String(envelope.messageId), hasMessage: true },
     channelId: 'messages',
@@ -33,6 +33,24 @@ export function buildPushMessage(token, envelope) {
  *   logger: import('pino').Logger,
  * }} deps
  */
+/**
+ * The ONLY content an incoming-call push carries: no caller name or number (the app shows who
+ * is calling only after it opens, and hides it for locked chats), no SDP, no keys. Short TTL:
+ * a call notification delivered after the call stopped ringing would only mislead.
+ */
+export function buildCallPushMessage(token, { callId, kind, ttlSeconds }) {
+  return {
+    to: token,
+    title: 'CipherChat',
+    body: kind === 'video' ? 'Incoming video call' : 'Incoming voice call',
+    data: { type: 'incoming_call', callId },
+    channelId: 'calls',
+    priority: 'high',
+    sound: 'default',
+    ttl: ttlSeconds,
+  };
+}
+
 export function createPushNotifier({ pushProvider, delayMs, logger }) {
   const pending = new Set();
 
@@ -43,6 +61,11 @@ export function createPushNotifier({ pushProvider, delayMs, logger }) {
     if (!envelope || envelope.deliveredAt) return 'delivered';
 
     const { recipientUserId: userId, recipientDeviceId: deviceId } = envelope;
+    return deliverToDevice(userId, deviceId, (token) => buildPushMessage(token, envelope));
+  }
+
+  /** Sends to a signed-in device's push token; drops tokens the push service rejects. */
+  async function deliverToDevice(userId, deviceId, buildMessage) {
     const [device, signedIn] = await Promise.all([
       Device.findOne({
         userId,
@@ -63,7 +86,7 @@ export function createPushNotifier({ pushProvider, delayMs, logger }) {
     if (!device || !signedIn) return 'no_target';
 
     const token = device.pushToken.token;
-    const result = await pushProvider.send(buildPushMessage(token, envelope));
+    const result = await pushProvider.send(buildMessage(token));
     if (!result.ok && result.error === 'DeviceNotRegistered') {
       // App uninstalled or token rotated: drop it (only if it is still the stored token).
       await Device.updateOne(
@@ -90,10 +113,27 @@ export function createPushNotifier({ pushProvider, delayMs, logger }) {
     run.finally(() => pending.delete(run));
   }
 
+  /**
+   * Incoming call: sent at once (a ringing call cannot wait for an ack delay). A phone that is
+   * open gets the call over Pusher and does not show this as a banner (see the app's
+   * notification handler); a backgrounded or closed one is woken by it. Best effort.
+   */
+  function notifyIncomingCall({ userId, deviceId, callId, kind, ttlSeconds }) {
+    if (!pushProvider) return;
+    const run = deliverToDevice(userId, deviceId, (token) =>
+      buildCallPushMessage(token, { callId, kind, ttlSeconds }),
+    ).catch((err) => {
+      logger.warn({ err }, 'Incoming-call push failed; an open app still gets the call');
+      return 'failed';
+    });
+    pending.add(run);
+    run.finally(() => pending.delete(run));
+  }
+
   /** Resolves when every scheduled notification has been handled (tests, graceful shutdown). */
   async function idle() {
     while (pending.size > 0) await Promise.allSettled([...pending]);
   }
 
-  return { schedule, idle, notifyIfUndelivered };
+  return { schedule, idle, notifyIfUndelivered, notifyIncomingCall };
 }

@@ -18,10 +18,20 @@ export const LOCAL_STATUS = Object.freeze({
   UNDECRYPTABLE: 'undecryptable',
   /** Incoming, encrypted with a new identity key the user has not accepted yet (held). */
   IDENTITY_PENDING: 'identity_pending',
+  /**
+   * Incoming and decrypted, but its content cannot be shown (see messaging/content.js): a
+   * placeholder whose `error` says why. Nothing of the content is kept.
+   */
+  UNSUPPORTED: 'unsupported',
 });
 
 /** Error of an outgoing message held because the peer's security code changed. */
 export const UNTRUSTED_IDENTITY = 'UNTRUSTED_IDENTITY';
+
+/** Errors of an `unsupported` message: a type or version this app version cannot show... */
+export const UNSUPPORTED_CONTENT = 'UNSUPPORTED_CONTENT';
+/** ...or content that is malformed (missing or wrong fields, too large, not valid JSON). */
+export const INVALID_CONTENT = 'INVALID_CONTENT';
 
 const OUTGOING_RANK = { sending: 0, failed: 0, sent: 1, delivered: 2, read: 3 };
 
@@ -44,7 +54,7 @@ export async function ensureConversation(peerUserId, { title = null, at = null }
 
 export async function getConversation(peerUserId) {
   return getDatabase().getFirstAsync(
-    `SELECT peer_user_id AS peerUserId, title, created_at AS createdAt,
+    `SELECT peer_user_id AS peerUserId, title, peer_phone AS peerPhone, created_at AS createdAt,
             last_message_at AS lastMessageAt, locked
        FROM conversations WHERE peer_user_id = ?;`,
     peerUserId,
@@ -59,9 +69,10 @@ export async function getConversation(peerUserId) {
  */
 export async function listConversations({ locked = false } = {}) {
   return getDatabase().getAllAsync(
-    `SELECT c.peer_user_id AS peerUserId, c.title,
+    `SELECT c.peer_user_id AS peerUserId, c.title, c.peer_phone AS peerPhone,
             COALESCE(c.last_message_at, c.created_at) AS sortAt,
             last.body AS lastBody, last.direction AS lastDirection, last.status AS lastStatus,
+            la.kind AS lastAttachmentKind, la.voice_note AS lastVoiceNote,
             (SELECT count(*) FROM messages u
                WHERE u.peer_user_id = c.peer_user_id AND u.direction = 'in'
                  AND u.status = 'received') AS unread
@@ -69,6 +80,7 @@ export async function listConversations({ locked = false } = {}) {
        LEFT JOIN messages last ON last.id = (
          SELECT m.id FROM messages m WHERE m.peer_user_id = c.peer_user_id
           ORDER BY m.created_at DESC, m.id DESC LIMIT 1)
+       LEFT JOIN attachments la ON la.message_id = last.id
       WHERE c.locked = ?
       ORDER BY sortAt DESC;`,
     locked ? 1 : 0,
@@ -81,6 +93,43 @@ export async function listUntitledConversationIds() {
     'SELECT peer_user_id AS peerUserId FROM conversations WHERE title IS NULL;',
   );
   return rows.map((r) => r.peerUserId);
+}
+
+/** Unnamed conversations whose phone number is not known yet. */
+export async function listConversationsWithoutPhone() {
+  const rows = await getDatabase().getAllAsync(
+    'SELECT peer_user_id AS peerUserId FROM conversations WHERE title IS NULL AND peer_phone IS NULL;',
+  );
+  return rows.map((r) => r.peerUserId);
+}
+
+/** Unnamed conversations whose phone number is known (to name them from the address book). */
+export async function listUntitledConversationPhones() {
+  return getDatabase().getAllAsync(
+    `SELECT peer_user_id AS peerUserId, peer_phone AS peerPhone FROM conversations
+      WHERE title IS NULL AND peer_phone IS NOT NULL;`,
+  );
+}
+
+/**
+ * Saves phone numbers of people who messaged us (GET /contacts/peers).
+ *
+ * @param {Array<{ userId: string, phoneNumber: string }>} peers
+ * @returns {Promise<number>} conversations updated
+ */
+export async function setPeerPhones(peers) {
+  const db = getDatabase();
+  let updated = 0;
+  for (const { userId, phoneNumber } of peers) {
+    const result = await db.runAsync(
+      'UPDATE conversations SET peer_phone = ? WHERE peer_user_id = ? AND peer_phone IS NOT ?;',
+      phoneNumber,
+      userId,
+      phoneNumber,
+    );
+    updated += result.changes;
+  }
+  return updated;
 }
 
 /**
@@ -159,14 +208,52 @@ export async function findPeerByServerMessageId(serverMessageId) {
   return row?.peerUserId ?? null;
 }
 
-/** Messages of one conversation, newest first (what the chat screen renders). */
+/**
+ * Messages of one conversation, newest first (what the chat screen renders). A photo, video or
+ * voice note comes with its display fields (never its key: that stays in media/attachmentService).
+ */
 export async function listChatMessages(peerUserId, limit = 200) {
-  return getDatabase().getAllAsync(
-    `SELECT id, client_message_id AS clientMessageId, server_message_id AS serverMessageId,
-            direction, body, status, error, created_at AS createdAt
-       FROM messages WHERE peer_user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?;`,
+  const rows = await getDatabase().getAllAsync(
+    `SELECT m.id, m.client_message_id AS clientMessageId, m.server_message_id AS serverMessageId,
+            m.direction, m.body, m.status, m.error, m.created_at AS createdAt,
+            a.kind AS attachmentKind, a.voice_note AS voiceNote, a.content_type AS contentType,
+            a.size AS attachmentSize, a.width, a.height, a.duration_ms AS durationMs,
+            a.waveform, a.state AS attachmentState, a.error AS attachmentError
+       FROM messages m LEFT JOIN attachments a ON a.message_id = m.id
+      WHERE m.peer_user_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT ?;`,
     peerUserId,
     limit,
+  );
+  return rows.map(
+    ({
+      attachmentKind,
+      voiceNote,
+      contentType,
+      attachmentSize,
+      width,
+      height,
+      durationMs,
+      waveform,
+      attachmentState,
+      attachmentError,
+      ...message
+    }) => ({
+      ...message,
+      attachment: attachmentKind
+        ? {
+            kind: attachmentKind,
+            voiceNote: voiceNote === 1,
+            contentType,
+            size: attachmentSize,
+            width,
+            height,
+            durationMs,
+            waveform,
+            state: attachmentState,
+            error: attachmentError,
+          }
+        : null,
+    }),
   );
 }
 

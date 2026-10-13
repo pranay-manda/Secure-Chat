@@ -1,9 +1,10 @@
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 
+import { openCallFromNotification } from '../calls/callEngine';
 import { findPeerByServerMessageId } from '../messaging/messageStore';
 import { requestSync } from '../messaging/messagingEngine';
-import { messageIdFromNotification } from './pushNotifications';
+import { callIdFromNotification, messageIdFromNotification } from './pushNotifications';
 
 /**
  * Notification-tap routing. One path for every tap:
@@ -34,10 +35,12 @@ function notifySubscribers() {
 export function captureResponse(response) {
   const notification = response?.notification;
   const messageId = messageIdFromNotification(notification);
-  if (!messageId) return false;
-  const id = notification?.request?.identifier ?? `message:${messageId}`;
+  const callId = callIdFromNotification(notification);
+  if (!messageId && !callId) return false;
+  const id =
+    notification?.request?.identifier ?? (callId ? `call:${callId}` : `message:${messageId}`);
   if (handled.has(id) || pending.some((tap) => tap.id === id)) return false;
-  pending.push({ id, messageId });
+  pending.push(callId ? { id, callId } : { id, messageId });
   notifySubscribers();
   return true;
 }
@@ -78,6 +81,13 @@ export function processPendingTaps() {
     while (pending.length > 0) {
       const tap = pending.shift();
       handled.add(tap.id);
+      if (tap.callId) {
+        // Incoming call: ask the server whether it still rings for THIS signed-in device (a
+        // call for a previous account is never shown). If it does, the call screen opens.
+        const ringing = await openCallFromNotification(tap.callId).catch(() => false);
+        if (ringing) router.push('/call');
+        continue;
+      }
       // Existing encrypted flow: fetch envelope over HTTPS, decrypt locally, store in SQLCipher.
       await requestSync().catch(() => {});
       const peer = await findPeerByServerMessageId(tap.messageId).catch(() => null);

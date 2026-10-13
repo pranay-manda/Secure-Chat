@@ -3,9 +3,11 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { create } from 'zustand';
 
+import { ENDPOINTS } from '../config/endpoints';
 import { apiRequest, setSessionEndedHandler } from '../lib/api';
 import { getDeviceId, resetDeviceId } from '../lib/deviceId';
 import { restoreSession, startSession, wipeLocalSession } from './session';
+import { loadSession, saveSession } from './tokenStore';
 
 const LOGOUT_TIMEOUT_MS = 5000;
 
@@ -55,7 +57,7 @@ export const useAuthStore = create((set, get) => ({
 
   /** @returns {Promise<{ expiresInSeconds: number, resendAfterSeconds: number }>} */
   async requestOtp(identifier) {
-    return apiRequest('POST', '/auth/otp/request', {
+    return apiRequest('POST', ENDPOINTS.AUTH.OTP_REQUEST, {
       body: identifierBody(identifier),
       auth: false,
     });
@@ -64,7 +66,7 @@ export const useAuthStore = create((set, get) => ({
   async verifyOtp(identifier, otp) {
     const deviceId = await getDeviceId();
     try {
-      const result = await apiRequest('POST', '/auth/otp/verify', {
+      const result = await apiRequest('POST', ENDPOINTS.AUTH.OTP_VERIFY, {
         body: { ...identifierBody(identifier), otp, device: deviceDetails(deviceId) },
         auth: false,
       });
@@ -81,7 +83,7 @@ export const useAuthStore = create((set, get) => ({
   /** Ends the session on the server (best effort) and always wipes local credentials and data. */
   async logout() {
     try {
-      await apiRequest('POST', '/auth/logout', { timeoutMs: LOGOUT_TIMEOUT_MS });
+      await apiRequest('POST', ENDPOINTS.AUTH.LOGOUT, { timeoutMs: LOGOUT_TIMEOUT_MS });
     } catch {
       // Offline or already expired: local wipe below still signs the user out.
     }
@@ -97,7 +99,7 @@ export const useAuthStore = create((set, get) => ({
    * nothing is lost, so the user can try again.
    */
   async deleteAccount() {
-    await apiRequest('DELETE', '/account');
+    await apiRequest('DELETE', ENDPOINTS.ACCOUNT.ROOT);
     await wipeLocalSession({ newDeviceId: true });
     set({ status: AUTH_STATUS.SIGNED_OUT, user: null, notice: 'Your account was deleted.' });
   },
@@ -115,6 +117,39 @@ export const useAuthStore = create((set, get) => ({
 
   clearNotice() {
     set({ notice: null });
+  },
+
+  /** Stores fresh account details (from the API) in memory and with the saved session. */
+  async setUser(user) {
+    const current = get().user;
+    if (!user || !current || user.id !== current.id) return;
+    const session = await loadSession();
+    if (session) await saveSession({ ...session, user });
+    set({ user });
+  },
+
+  /** Re-reads the account (e.g. an older session cached it without email or phone). */
+  async refreshUser() {
+    const { user } = await apiRequest('GET', ENDPOINTS.ACCOUNT.ROOT);
+    await get().setUser(user);
+    return user;
+  },
+
+  /** Adds a phone number to an account that has none. */
+  async addPhone(phoneNumber) {
+    const { user } = await apiRequest('POST', ENDPOINTS.ACCOUNT.PHONE, { body: { phoneNumber } });
+    await get().setUser(user);
+  },
+
+  /** Emails a code for adding `email` to an account that has none. */
+  async requestEmailCode(email) {
+    return apiRequest('POST', ENDPOINTS.ACCOUNT.EMAIL_OTP, { body: { email } });
+  },
+
+  /** Adds the email after its code was entered. */
+  async addEmail(email, otp) {
+    const { user } = await apiRequest('POST', ENDPOINTS.ACCOUNT.EMAIL, { body: { email, otp } });
+    await get().setUser(user);
   },
 }));
 

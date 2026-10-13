@@ -154,7 +154,7 @@ describe('tapping a notification', () => {
       request: {
         identifier,
         content: {
-          title: 'Secure Chat',
+          title: 'CipherChat',
           body: 'New message',
           data: { type, messageId, hasMessage: true },
         },
@@ -251,7 +251,7 @@ describe('tapping a notification', () => {
     const { messageIdFromNotification } = push;
     const res = response('n-1', 'srv-1');
     expect(res.notification.request.content).toEqual({
-      title: 'Secure Chat',
+      title: 'CipherChat',
       body: 'New message',
       data: { type: 'new_message', messageId: 'srv-1', hasMessage: true },
     });

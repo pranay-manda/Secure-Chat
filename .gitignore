@@ -6,6 +6,9 @@ node_modules/
 .env.*
 !.env.example
 
+# Encrypted attachment blobs of a local API (ATTACHMENT_STORAGE=local)
+apps/api/data/
+
 # Logs
 *.log
 npm-debug.log*

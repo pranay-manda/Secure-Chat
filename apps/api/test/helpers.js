@@ -10,6 +10,7 @@ import { createApp } from '../src/app.js';
 import { loadEnv } from '../src/config/env.js';
 import { createContainer } from '../src/container.js';
 import { createLogger } from '../src/lib/logger.js';
+import { Attachment } from '../src/models/Attachment.js';
 import { Counter } from '../src/models/Counter.js';
 import { Device } from '../src/models/Device.js';
 import { Message } from '../src/models/Message.js';
@@ -122,8 +123,13 @@ export function buildTestApp({ healthChecks, env = {}, redis, emailProvider, pus
   return { app, lines, sms, email, realtime, redis: redisClient, container, config };
 }
 
-/** Connects mongoose to the in-memory replica set using a database unique to the test file. */
+/**
+ * Connects mongoose to the in-memory replica set using a database unique to the test file,
+ * with the same global Mongoose settings as the server (strictQuery, sanitizeFilter), so a
+ * query that would be rejected in production fails in tests too.
+ */
 export async function connectTestDb() {
+  await import('../src/db/mongo.js');
   await mongoose.connect(inject('mongoUri'), { dbName: `test_${randomUUID().slice(0, 8)}` });
   await Promise.all(ALL_MODELS.map((model) => model.init()));
 }
@@ -132,7 +138,16 @@ export async function resetTestDb() {
   await Promise.all(ALL_MODELS.map((model) => model.deleteMany({})));
 }
 
-const ALL_MODELS = [User, Device, Session, OneTimePreKey, Message, MessageEnvelope, Counter];
+const ALL_MODELS = [
+  User,
+  Device,
+  Session,
+  OneTimePreKey,
+  Message,
+  MessageEnvelope,
+  Counter,
+  Attachment,
+];
 
 /** Every document in every collection, as one JSON string (for leak scanning). */
 export async function dumpDatabase() {

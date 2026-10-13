@@ -111,7 +111,7 @@ export default function SettingsScreen() {
       <ListRow
         icon="information-circle-outline"
         title="About"
-        subtitle={`Secure Chat ${Constants.expoConfig?.version ?? ''}`}
+        subtitle={`CipherChat ${Constants.expoConfig?.version ?? ''}`}
       />
 
       <View style={styles.logout}>

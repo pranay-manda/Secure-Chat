@@ -1,7 +1,10 @@
 import { randomUUID } from 'expo-crypto';
 
+import { endCallForSignOut } from '../calls/callEngine';
 import { destroyDatabase, getMeta, openDatabase, setMeta } from '../db/database';
 import { resetDeviceId } from '../lib/deviceId';
+import { wipeAllMedia } from '../media/mediaFiles';
+import { resetPresence } from '../presence/usePresence';
 import { stopMessaging } from '../messaging/messagingEngine';
 import { unregisterPushNotifications } from '../notifications/pushNotifications';
 import { deleteSecureItem, getSecureItem, SECURE_KEYS, setSecureItem } from '../lib/secureStorage';
@@ -62,11 +65,17 @@ export async function restoreSession() {
  * which is required after the server revoked it.
  */
 export async function wipeLocalSession({ newDeviceId = false } = {}) {
+  // A call in progress ends here: microphone, peer connection and audio are released (the
+  // server ends the call for the other side on logout/revocation/deletion).
+  endCallForSignOut();
   // Stop realtime and sync first so nothing writes into the database while it is destroyed.
   stopMessaging();
+  resetPresence();
   await unregisterPushNotifications().catch(() => {});
   await clearSession();
   await destroyDatabase();
+  // Encrypted blobs (their keys were in the database) and any temporary plaintext.
+  wipeAllMedia();
   await deleteSecureItem(SECURE_KEYS.INSTALL_ID);
   await deleteSecureItem(SECURE_KEYS.SIGNAL_IDENTITY);
   if (newDeviceId) await resetDeviceId();

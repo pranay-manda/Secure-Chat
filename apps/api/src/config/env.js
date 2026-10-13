@@ -12,10 +12,44 @@ const commaList = z
       .filter(Boolean),
   );
 
+/** An email sender: `you@example.com` or `CipherChat <you@example.com>`. */
+const SENDER = /^(?:[^<>\r\n]+ <[^\s@<>]+@[^\s@<>]+>|[^\s@<>]+@[^\s@<>]+)$/;
+const EMAIL_ADDRESS = /^[^\s@<>]+@[^\s@<>]+$/;
+
+/** An optional variable; an empty value (e.g. `SMTP_PORT=`) counts as not set. */
+const optionalEnv = (schema) =>
+  z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    schema.optional(),
+  );
+
 const secretSchema = z
   .string()
   .min(32, 'must be at least 32 characters (use a random value)')
   .refine((value) => !/change-me|<[^>]+>/i.test(value), 'must be replaced with a random value');
+
+/**
+ * STUN/TURN URI (RFC 7064 / RFC 7065): `scheme:host[:port]`, TURN optionally with
+ * `?transport=udp|tcp`. There is deliberately no room for a user name or password: these URLs
+ * are sent to every phone, while TURN credentials are minted per call (see iceServers.js).
+ * Returns null if the value is not such a URI.
+ */
+export function parseIceUrl(url) {
+  const match =
+    /^(stuns?|turns?):(\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::(\d{1,5}))?(?:\?transport=(udp|tcp))?$/i.exec(
+      url,
+    );
+  if (!match) return null;
+  const port = match[3] === undefined ? null : Number(match[3]);
+  if (port !== null && (port < 1 || port > 65_535)) return null;
+  const scheme = match[1].toLowerCase();
+  const transport = match[4]?.toLowerCase() ?? null;
+  if (transport && !scheme.startsWith('turn')) return null; // STUN URIs have no transport
+  if (scheme === 'turns' && transport === 'udp') return null; // turns: is TLS over TCP
+  return { scheme, host: match[2], port, transport };
+}
+
+const isUrlOf = (kind) => (url) => parseIceUrl(url)?.scheme.startsWith(kind) === true;
 
 const envSchema = z
   .object({
@@ -58,21 +92,31 @@ const envSchema = z
      */
     SMS_PROVIDER: z.enum(['console', 'none']).default('console'),
 
-    /** `resend` sends real email; `console` (development only) prints codes; `none` = off. */
-    EMAIL_PROVIDER: z.enum(['resend', 'console', 'none']).default('resend'),
-    RESEND_API_KEY: z
-      .string()
-      .regex(/^re_[A-Za-z0-9_]+$/, 'must be a Resend API key (starts with re_)')
-      .optional(),
-    /** Verified Resend sender: `you@your-domain` or `Secure Chat <you@your-domain>`. */
-    RESEND_FROM_EMAIL: z
-      .string()
-      .trim()
-      .regex(
-        /^(?:[^<>\r\n]+ <[^\s@<>]+@[^\s@<>]+>|[^\s@<>]+@[^\s@<>]+)$/,
-        'must be an email address or "Name <email address>"',
-      )
-      .optional(),
+    /**
+     * `smtp` sends real email through an SMTP server (Nodemailer, TLS required); `console`
+     * (development only) prints codes to the terminal; `none` switches email sign-in off.
+     */
+    EMAIL_PROVIDER: z
+      .enum(['smtp', 'console', 'none'], {
+        error: 'must be smtp, console or none (resend was replaced by smtp; see .env.example)',
+      })
+      .default('smtp'),
+    /** SMTP server host name, e.g. smtp.gmail.com (no scheme, no port). */
+    SMTP_HOST: optionalEnv(
+      z
+        .string()
+        .trim()
+        .regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i, 'must be a host name like smtp.gmail.com'),
+    ),
+    /** 587 (recommended): STARTTLS, required. 465: TLS from the start. Never plain text. */
+    SMTP_PORT: optionalEnv(z.coerce.number().int().min(1).max(65_535)),
+    SMTP_USER: optionalEnv(z.string().trim().min(1)),
+    /** Gmail: an App Password (needs 2-Step Verification), not the account password. */
+    SMTP_PASS: optionalEnv(z.string().min(1)),
+    /** Sender shown to users; defaults to SMTP_USER. `you@x.com` or `CipherChat <you@x.com>`. */
+    SMTP_FROM: optionalEnv(
+      z.string().trim().regex(SENDER, 'must be an email address or "Name <email address>"'),
+    ),
 
     // --- Push notifications (Expo push service -> FCM V1; credentials live in the EAS project) ---
     /** `expo` sends through Expo's push service; `none` disables push notifications. */
@@ -81,6 +125,51 @@ const envSchema = z
     EXPO_ACCESS_TOKEN: z.string().min(20).optional(),
     /** Wait this long for the device to ack over realtime before sending a push. */
     PUSH_NOTIFY_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(3000),
+
+    // --- Voice calls (WebRTC; the server only relays signaling, never audio) ---
+    /** An unanswered call ends as "missed" after this long. */
+    CALL_RING_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(45),
+    /** Backstop lifetime of an answered call's server state (cleared normally on hang-up). */
+    CALL_MAX_DURATION_SECONDS: z.coerce.number().int().min(60).max(86_400).default(14_400),
+    /**
+     * STUN servers (comma-separated `stun:` URLs). The default is Google's public STUN server:
+     * fine for development; production should point at its own (e.g. the TURN host's STUN port).
+     */
+    STUN_URLS: z
+      .string()
+      .default('stun:stun.l.google.com:19302')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    /**
+     * TURN relay (coturn-compatible "TURN REST API"): comma-separated `turn:`/`turns:` URLs and
+     * the shared secret configured on the TURN server (`static-auth-secret`). The API mints
+     * short-lived credentials per call from it; the secret itself never leaves the server.
+     * Both or neither. Without TURN, calls behind strict NATs/firewalls cannot connect.
+     */
+    TURN_URLS: commaList,
+    TURN_SECRET: secretSchema.optional(),
+    /** Lifetime of minted TURN credentials; must cover the longest possible call. */
+    TURN_CREDENTIAL_TTL_SECONDS: z.coerce.number().int().min(300).max(86_400).default(18_000),
+    /**
+     * `all` (default): direct connections when possible, TURN as fallback. `relay`: media always
+     * goes through TURN (hides each phone's IP address from the other; also the way to prove a
+     * TURN server works). Needs TURN.
+     */
+    ICE_TRANSPORT_POLICY: z.enum(['all', 'relay']).default('all'),
+
+    // --- Attachments: encrypted blobs only (the server never has media keys or plaintext) ---
+    /** `local`: the API host's disk, single instance only. */
+    ATTACHMENT_STORAGE: z.enum(['local']).default('local'),
+    ATTACHMENT_STORAGE_DIR: z.string().min(1).default('./data/attachments'),
+    /** Expired blobs are deleted this often (0 disables the sweep). */
+    ATTACHMENT_SWEEP_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(86_400).default(600),
+
+    // --- Presence (online status): forgotten this long after the last heartbeat ---
+    PRESENCE_TTL_SECONDS: z.coerce.number().int().min(5).max(600).default(45),
 
     // --- Realtime (Pusher Channels). All four or none; without them clients rely on sync. ---
     PUSHER_APP_ID: z.string().min(1).optional(),
@@ -101,6 +190,56 @@ const envSchema = z
       }
     }
 
+    if (env.TURN_URLS.length > 0 && !env.TURN_SECRET) {
+      ctx.addIssue({ code: 'custom', path: ['TURN_SECRET'], message: 'required with TURN_URLS' });
+    }
+    if (env.TURN_SECRET && env.TURN_URLS.length === 0) {
+      ctx.addIssue({ code: 'custom', path: ['TURN_URLS'], message: 'required with TURN_SECRET' });
+    }
+    if (!env.TURN_URLS.every(isUrlOf('turn'))) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TURN_URLS'],
+        message:
+          'must be turn:/turns: URLs like turn:host:3478?transport=udp (no user name or password in the URL)',
+      });
+    }
+    if (!env.STUN_URLS.every(isUrlOf('stun'))) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['STUN_URLS'],
+        message: 'must be stun:/stuns: URLs like stun:host:3478',
+      });
+    }
+    if (env.TURN_SECRET && [env.JWT_ACCESS_SECRET, env.OTP_HMAC_SECRET].includes(env.TURN_SECRET)) {
+      // The TURN server holds this secret too: it must not be able to sign tokens.
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TURN_SECRET'],
+        message: 'must differ from JWT_ACCESS_SECRET and OTP_HMAC_SECRET',
+      });
+    }
+    if (
+      env.TURN_URLS.length > 0 &&
+      env.TURN_CREDENTIAL_TTL_SECONDS <
+        env.CALL_RING_TIMEOUT_SECONDS + env.CALL_MAX_DURATION_SECONDS
+    ) {
+      // The TURN server checks the credential on every allocation refresh: if it expires
+      // mid-call, a relayed call loses its audio.
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TURN_CREDENTIAL_TTL_SECONDS'],
+        message: 'must be at least CALL_RING_TIMEOUT_SECONDS + CALL_MAX_DURATION_SECONDS',
+      });
+    }
+    if (env.ICE_TRANSPORT_POLICY === 'relay' && env.TURN_URLS.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ICE_TRANSPORT_POLICY'],
+        message: 'relay needs TURN_URLS and TURN_SECRET',
+      });
+    }
+
     if (env.JWT_ACCESS_SECRET === env.OTP_HMAC_SECRET) {
       ctx.addIssue({
         code: 'custom',
@@ -109,15 +248,23 @@ const envSchema = z
       });
     }
 
-    if (env.EMAIL_PROVIDER === 'resend') {
-      for (const key of ['RESEND_API_KEY', 'RESEND_FROM_EMAIL']) {
-        if (!env[key]) {
+    if (env.EMAIL_PROVIDER === 'smtp') {
+      for (const key of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS']) {
+        if (env[key] === undefined) {
           ctx.addIssue({
             code: 'custom',
             path: [key],
-            message: 'required when EMAIL_PROVIDER=resend',
+            message: 'required when EMAIL_PROVIDER=smtp',
           });
         }
+      }
+      // The sender defaults to SMTP_USER, which then has to be an email address.
+      if (!env.SMTP_FROM && env.SMTP_USER && !EMAIL_ADDRESS.test(env.SMTP_USER)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SMTP_FROM'],
+          message: 'required when SMTP_USER is not an email address (it is the default sender)',
+        });
       }
     }
 
@@ -168,7 +315,7 @@ const envSchema = z
       ctx.addIssue({
         code: 'custom',
         path: ['EMAIL_PROVIDER'],
-        message: 'console provider is for development only; use resend',
+        message: 'console provider is for development only; use smtp',
       });
     }
   });
@@ -230,14 +377,42 @@ export function loadEnv(source = process.env) {
     sms: Object.freeze({ provider: env.SMS_PROVIDER }),
     email: Object.freeze({
       provider: env.EMAIL_PROVIDER,
-      resendApiKey: env.RESEND_API_KEY,
-      from: env.RESEND_FROM_EMAIL,
+      smtp:
+        env.EMAIL_PROVIDER === 'smtp'
+          ? Object.freeze({
+              host: env.SMTP_HOST,
+              port: env.SMTP_PORT,
+              user: env.SMTP_USER,
+              pass: env.SMTP_PASS,
+              from: env.SMTP_FROM || env.SMTP_USER,
+            })
+          : null,
       otpTtlSeconds: env.OTP_TTL_SECONDS,
     }),
     push: Object.freeze({
       provider: env.PUSH_PROVIDER,
       accessToken: env.EXPO_ACCESS_TOKEN,
       notifyDelayMs: env.PUSH_NOTIFY_DELAY_MS,
+    }),
+    calls: Object.freeze({
+      ringTimeoutSeconds: env.CALL_RING_TIMEOUT_SECONDS,
+      maxDurationSeconds: env.CALL_MAX_DURATION_SECONDS,
+      stunUrls: Object.freeze(env.STUN_URLS),
+      iceTransportPolicy: env.ICE_TRANSPORT_POLICY,
+      turn:
+        env.TURN_URLS.length > 0
+          ? Object.freeze({
+              urls: Object.freeze(env.TURN_URLS),
+              secret: env.TURN_SECRET,
+              credentialTtlSeconds: env.TURN_CREDENTIAL_TTL_SECONDS,
+            })
+          : null,
+    }),
+    presence: Object.freeze({ ttlSeconds: env.PRESENCE_TTL_SECONDS }),
+    attachments: Object.freeze({
+      driver: env.ATTACHMENT_STORAGE,
+      dir: env.ATTACHMENT_STORAGE_DIR,
+      sweepIntervalSeconds: env.ATTACHMENT_SWEEP_INTERVAL_SECONDS,
     }),
     pusher: env.PUSHER_APP_ID
       ? Object.freeze({

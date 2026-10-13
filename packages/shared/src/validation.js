@@ -1,6 +1,13 @@
 import { z } from 'zod';
 
-import { CIPHERTEXT_TYPE, DEVICE_PLATFORM, LIMITS, OTP_LENGTH, SIGNAL } from './constants.js';
+import {
+  ATTACHMENT_MAX_ENCRYPTED_BYTES,
+  CIPHERTEXT_TYPE,
+  DEVICE_PLATFORM,
+  LIMITS,
+  OTP_LENGTH,
+  SIGNAL,
+} from './constants.js';
 
 /** 24-char hex MongoDB ObjectId. */
 export const objectIdSchema = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid id');
@@ -103,6 +110,16 @@ export const expoPushTokenSchema = z
 
 /** Pusher connection id, e.g. "123456.7890123". */
 export const pusherSocketIdSchema = z.string().regex(/^\d{1,20}\.\d{1,20}$/, 'Invalid socket id');
+
+/** Client-generated idempotency key of one attachment upload (UUID v4). */
+export const clientAttachmentIdSchema = z.uuid({ version: 'v4' });
+
+/** Size in bytes of an encrypted attachment blob (what is uploaded and stored). */
+export const encryptedAttachmentSizeSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(ATTACHMENT_MAX_ENCRYPTED_BYTES);
 
 export const pageSizeSchema = z.coerce
   .number()

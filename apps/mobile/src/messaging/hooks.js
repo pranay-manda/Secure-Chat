@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 
+import { listCallLog, listPeerCalls, useCallLogStore } from '../calls/callHistory';
 import { getPendingIdentityChange, listIdentityChanges } from '../crypto/signalService';
+import { formatPhone } from '../lib/phone';
+import { useMediaStore } from '../media/attachmentService';
 import {
   getConversation,
   listChatMessages,
@@ -9,9 +12,14 @@ import {
 } from './messageStore';
 import { useMessagingStore } from './messagingEngine';
 
-/** Re-reads `load()` from the encrypted database whenever local messaging data changes. */
+/**
+ * Re-reads `load()` from the encrypted database whenever local messaging data or the call
+ * history changes.
+ */
 function useLocalQuery(load, deps) {
   const revision = useMessagingStore((state) => state.revision);
+  const callRevision = useCallLogStore((state) => state.revision);
+  const mediaRevision = useMediaStore((state) => state.revision);
   const [state, setState] = useState({ data: null, error: null });
 
   useEffect(() => {
@@ -24,7 +32,7 @@ function useLocalQuery(load, deps) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deps are passed by the caller
-  }, [revision, ...deps]);
+  }, [revision, callRevision, mediaRevision, ...deps]);
 
   return state;
 }
@@ -53,7 +61,7 @@ export function useUnreadTotal() {
 /**
  * One conversation: its messages, plus its security state. `identityChange` is the undecided
  * change of the contact's security code (or null); `identityEvents` are past and pending
- * changes, shown as notices in the chat.
+ * changes, and `calls` the voice calls with this person, all shown in the chat timeline.
  */
 export function useChat(peerUserId) {
   return useLocalQuery(
@@ -62,12 +70,21 @@ export function useChat(peerUserId) {
       messages: await listChatMessages(peerUserId),
       identityChange: await getPendingIdentityChange(peerUserId),
       identityEvents: await listIdentityChanges(peerUserId),
+      calls: await listPeerCalls(peerUserId),
     }),
     [peerUserId],
   );
 }
 
-/** Display name for a peer: local nickname, else a short form of their user ID. */
-export function peerLabel(peerUserId, title) {
-  return title || `User …${String(peerUserId).slice(-6)}`;
+/** This phone's call history, newest first (each row says whether its chat is locked). */
+export function useCallLog() {
+  return useLocalQuery(listCallLog, []);
+}
+
+/**
+ * Display name for a peer: the local name (contact name or nickname), else their phone number
+ * (known once they have messaged us), else a short form of their user ID.
+ */
+export function peerLabel(peerUserId, title, phone = null) {
+  return title || (phone ? formatPhone(phone) : null) || `User …${String(peerUserId).slice(-6)}`;
 }

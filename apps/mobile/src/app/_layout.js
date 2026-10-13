@@ -34,14 +34,14 @@ export default function RootLayout() {
     <>
       <Stack screenOptions={{ headerTitleAlign: 'center', headerShadowVisible: false }}>
         <Stack.Protected guard={!signedIn}>
-          <Stack.Screen name="sign-in" options={{ title: 'Secure Chat' }} />
+          <Stack.Screen name="sign-in" options={{ title: 'CipherChat' }} />
           <Stack.Screen name="verify" options={{ title: 'Verify' }} />
         </Stack.Protected>
         <Stack.Protected guard={signedIn}>
           <Stack.Screen name="(app)" options={{ headerShown: false }} />
         </Stack.Protected>
       </Stack>
-      <StatusBar style="auto" />
+      <StatusBar style="dark" />
     </>
   );
 }

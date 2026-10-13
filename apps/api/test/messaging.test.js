@@ -453,7 +453,8 @@ describe('delivery and read state', () => {
     expect((await api(bob).post('/messages/status', { messageIds: [id] })).body.statuses).toEqual(
       [],
     );
-    expect(await Message.countDocuments({ readAt: { $ne: null } })).toBe(0);
+    const mongoose = (await import('mongoose')).default;
+    expect(await Message.countDocuments({ readAt: mongoose.trusted({ $ne: null }) })).toBe(0);
   });
 
   it('validates receipt batches', async () => {

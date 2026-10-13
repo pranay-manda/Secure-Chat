@@ -1,9 +1,26 @@
 import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
 
+import { reconcileCall } from '../calls/callEngine';
 import { requestSync } from '../messaging/messagingEngine';
 import { onTapQueued, processPendingTaps } from './notificationRouting';
-import { registerForPushNotifications, watchPushTokenChanges } from './pushNotifications';
+import {
+  callIdFromNotification,
+  registerForPushNotifications,
+  watchPushTokenChanges,
+} from './pushNotifications';
+
+/**
+ * A push received while the app is open (P5). Pusher normally got there first; sync just in
+ * case. An incoming-call push whose realtime invite was lost would otherwise never ring (its
+ * banner is suppressed in the foreground): ask the server, through the authenticated
+ * current-call endpoint, and ring only if it confirms a call ringing for this device. The push
+ * payload itself is never taken as call state.
+ */
+export function onForegroundNotification(notification) {
+  requestSync();
+  if (callIdFromNotification(notification)) reconcileCall().catch(() => {});
+}
 
 /**
  * Push notification wiring for the signed-in app.
@@ -17,8 +34,7 @@ export function useNotifications(messagingReady, navigationReady) {
     if (!messagingReady) return undefined;
     registerForPushNotifications();
     const stopWatching = watchPushTokenChanges();
-    // A push received while open: Pusher normally got there first; sync just in case.
-    const received = Notifications.addNotificationReceivedListener(() => requestSync());
+    const received = Notifications.addNotificationReceivedListener(onForegroundNotification);
     return () => {
       stopWatching();
       received.remove();

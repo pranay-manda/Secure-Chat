@@ -35,7 +35,7 @@ async function resolvePermission({ ask }) {
 }
 
 /**
- * New Chat: people from this phone's contacts who use Secure Chat, plus the Secure Chat ID
+ * New Chat: people from this phone's contacts who use CipherChat, plus the CipherChat ID
  * fallback. Contacts permission is asked here (never at app start); only phone numbers are
  * sent for matching, contact names stay on the device.
  *
@@ -63,7 +63,7 @@ export default function NewChatScreen() {
         err instanceof NetworkError
           ? 'You’re offline. Connect to the internet and try again.'
           : err?.code === 'RATE_LIMITED'
-            ? 'Too many lookups for now. Try again later or use a Secure Chat ID.'
+            ? 'Too many lookups for now. Try again later or use a CipherChat ID.'
             : 'Could not check your contacts. Try again.',
       );
       setState('error');
@@ -121,7 +121,7 @@ export default function NewChatScreen() {
       <SectionHeader>Other ways</SectionHeader>
       <ListRow
         icon="key-outline"
-        title="Search by Secure Chat ID"
+        title="Search by CipherChat ID"
         subtitle="For people who aren’t in your contacts"
         onPress={() => router.push('/new-chat-id')}
       />
@@ -171,7 +171,7 @@ export default function NewChatScreen() {
           <EmptyState
             icon="people-outline"
             title="Find people you know"
-            message="Contacts permission is needed to find people you know on Secure Chat. Only phone numbers are checked; names never leave your phone."
+            message="Contacts permission is needed to find people you know on CipherChat. Only phone numbers are checked; names never leave your phone."
           >
             <View style={styles.actions}>
               <PrimaryButton
@@ -179,7 +179,7 @@ export default function NewChatScreen() {
                 onPress={tryAgain}
               />
               <TextButton
-                title="Continue with Secure Chat ID"
+                title="Continue with CipherChat ID"
                 onPress={() => router.push('/new-chat-id')}
               />
             </View>
@@ -200,7 +200,7 @@ export default function NewChatScreen() {
           keyExtractor={(p) => p.userId}
           keyboardShouldPersistTaps="handled"
           ListHeaderComponent={
-            people.length > 0 ? <SectionHeader>Contacts on Secure Chat</SectionHeader> : null
+            people.length > 0 ? <SectionHeader>Contacts on CipherChat</SectionHeader> : null
           }
           renderItem={({ item }) => (
             <Pressable
@@ -225,8 +225,8 @@ export default function NewChatScreen() {
             ) : (
               <EmptyState
                 icon="people-outline"
-                title="None of your contacts use Secure Chat yet"
-                message="Invite them, or start a chat with a Secure Chat ID."
+                title="None of your contacts use CipherChat yet"
+                message="Invite them, or start a chat with a CipherChat ID."
               />
             )
           }

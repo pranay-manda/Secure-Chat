@@ -1,0 +1,8 @@
+{
+  "name": "media-crypto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Expo module: streaming AES-256-GCM encryption of attachment files (libsignal), confined to app-private storage",
+  "main": "index.js",
+  "license": "AGPL-3.0-only"
+}

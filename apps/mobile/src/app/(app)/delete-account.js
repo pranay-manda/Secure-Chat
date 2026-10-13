@@ -11,7 +11,7 @@ import { colors, radius, spacing, type } from '../../theme';
 const CONFIRMATION_WORD = 'DELETE';
 
 const CONSEQUENCES = [
-  'Your account, phone number or email and profile are removed from Secure Chat.',
+  'Your account, phone number or email and profile are removed from CipherChat.',
   'All your messages and chats on this phone are erased.',
   'Your encryption keys are destroyed. Messages waiting for you can never be read.',
   'You are signed out on every device.',
